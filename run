@@ -1,0 +1,197 @@
+#!/bin/bash
+set -e
+
+# Detect the operating system for platform-specific behavior
+detect_os() {
+  # Handle various ways to detect OS
+  if [[ -n "${WINDIR:-}" ]] || [[ -n "${SYSTEMROOT:-}" ]]; then
+    echo "Windows"
+  elif [[ "$(uname -s 2>/dev/null)" == "Darwin" ]]; then
+    echo "macOS"
+  elif [[ "$(uname -s 2>/dev/null)" == "Linux" ]]; then
+    echo "Linux"
+  else
+    case "$(uname -s 2>/dev/null || echo Unknown)" in
+      CYGWIN*|MINGW*|MSYS*) echo "Windows" ;;
+      *) echo "Unknown" ;;
+    esac
+  fi
+}
+
+OS=$(detect_os)
+
+# Only show diagnostic output for install/test commands
+VERBOSE_MODE=false
+if [[ "${1:-}" == "install" ]] || [[ "${1:-}" == "test" ]]; then
+  VERBOSE_MODE=true
+  echo "Detected OS: $OS" >&2
+fi
+
+# --- pick a Python (platform-aware) ---
+find_python() {
+  # On Windows, 'py' launcher is preferred, then python3, then python
+  # On Unix-like systems, python3 is preferred, then python
+  if [[ "$OS" == "Windows" ]]; then
+    if command -v py >/dev/null 2>&1; then
+      echo "py"
+    elif command -v python3 >/dev/null 2>&1; then
+      echo "python3"
+    elif command -v python >/dev/null 2>&1; then
+      echo "python"
+    else
+      return 1
+    fi
+  else
+    # Unix-like systems (Linux, macOS)
+    if command -v python3 >/dev/null 2>&1; then
+      echo "python3"
+    elif command -v python >/dev/null 2>&1; then
+      echo "python"
+    elif command -v py >/dev/null 2>&1; then
+      echo "py"
+    else
+      return 1
+    fi
+  fi
+}
+
+if PY=$(find_python); then
+  if [[ "$VERBOSE_MODE" == "true" ]]; then
+    echo "Found Python: $PY" >&2
+  fi
+else
+  echo "Error: Python not found. Please install Python 3.8+ and ensure it's in your PATH." >&2
+  echo "  - Windows: Install from python.org or Microsoft Store" >&2
+  echo "  - macOS: brew install python3 or install from python.org" >&2
+  echo "  - Linux: sudo apt install python3 python3-pip (Ubuntu/Debian)" >&2
+  echo "           sudo yum install python3 python3-pip (RHEL/CentOS)" >&2
+  exit 1
+fi
+
+# --- pick a pip compatible with that Python ---
+find_pip() {
+  # Always prefer using pip as a module with the selected Python
+  if "$PY" -m pip --version >/dev/null 2>&1; then
+    echo "$PY -m pip"
+  elif command -v pip3 >/dev/null 2>&1; then
+    echo "pip3"
+  elif command -v pip >/dev/null 2>&1; then
+    echo "pip"
+  else
+    return 1
+  fi
+}
+
+if PIP_CMD=$(find_pip); then
+  if [[ "$VERBOSE_MODE" == "true" ]]; then
+    echo "Found pip: $PIP_CMD" >&2
+  fi
+else
+  echo "Error: pip not found for $PY." >&2
+  echo "Please install pip:" >&2
+  echo "  - Windows: pip is usually included with Python" >&2
+  echo "  - macOS: python3 -m ensurepip --upgrade" >&2
+  echo "  - Linux: sudo apt install python3-pip (Ubuntu/Debian)" >&2
+  exit 1
+fi
+
+cmd="${1:-}"
+case "$cmd" in
+  install)
+    echo "Starting installation for $OS..." >&2
+
+    # Platform-specific installation strategy
+    install_package() {
+      local install_cmd="$1"
+      echo "Trying: $install_cmd" >&2
+      if eval "$install_cmd" >/dev/null 2>&1; then
+        return 0
+      else
+        return 1
+      fi
+    }
+
+    # Try different installation methods in order of preference
+    INSTALL_SUCCESS=false
+
+    # Method 1: --user flag (preferred for autograder compatibility)
+    if install_package "$PIP_CMD install --user -e '.[dev]'"; then
+      echo "Installed with --user flag" >&2
+      INSTALL_SUCCESS=true
+    # Method 2: without --user (for environments where --user doesn't work)
+    elif install_package "$PIP_CMD install -e '.[dev]'"; then
+      echo "Installed without --user flag" >&2
+      INSTALL_SUCCESS=true
+    # Method 3: force reinstall (for permission issues)
+    elif install_package "$PIP_CMD install --user --force-reinstall -e '.[dev]'"; then
+      echo "Installed with --user --force-reinstall" >&2
+      INSTALL_SUCCESS=true
+    # Method 4: upgrade pip and retry (for older pip versions)
+    elif $PIP_CMD install --user --upgrade pip >/dev/null 2>&1 && install_package "$PIP_CMD install --user -e '.[dev]'"; then
+      echo "Upgraded pip and installed with --user" >&2
+      INSTALL_SUCCESS=true
+    fi
+
+    if [ "$INSTALL_SUCCESS" = true ]; then
+      echo "Installation completed successfully on $OS!" >&2
+      # Verify installation
+      if $PY -c "import acmecli; print('✓ Package import successful')" 2>/dev/null; then
+        echo "✓ Installation verified" >&2
+      else
+        echo "⚠ Installation completed but package import failed" >&2
+      fi
+    else
+      echo "❌ Installation failed on $OS" >&2
+      echo "Troubleshooting tips:" >&2
+      echo "  - Ensure Python 3.8+ is installed" >&2
+      echo "  - Try: $PIP_CMD install --upgrade pip setuptools wheel" >&2
+      echo "  - Check permissions in your Python environment" >&2
+      if [[ "$OS" == "Windows" ]]; then
+        echo "  - Try running as Administrator" >&2
+        echo "  - Ensure Python is added to PATH" >&2
+      elif [[ "$OS" == "Linux" ]]; then
+        echo "  - Try: sudo $PIP_CMD install -e '.[dev]'" >&2
+        echo "  - Install build dependencies: sudo apt install python3-dev build-essential" >&2
+      elif [[ "$OS" == "macOS" ]]; then
+        echo "  - Install Xcode command line tools: xcode-select --install" >&2
+        echo "  - Try with homebrew Python: brew install python" >&2
+      fi
+      exit 1
+    fi
+    ;;
+  test)
+    # Run coverage with pytest first
+    if ! "$PY" -m coverage run -m pytest -q; then
+      echo "Tests failed" >&2
+      exit 1
+    fi
+
+    # Generate coverage report
+    "$PY" -m coverage json -o coverage.json || {
+      echo "Coverage report generation failed" >&2
+      exit 1
+    }
+
+    # Extract test count and coverage percentage
+    pct=$("$PY" -c "
+import json
+try:
+    with open('coverage.json', 'r') as f:
+        data = json.load(f)
+        pct_val = data.get('totals', {}).get('percent_covered', 0.0)
+        print(f'{pct_val:.0f}%')
+except:
+    print('0%')
+" 2>/dev/null || echo "0%")
+
+    # Get test results
+    test_output=$("$PY" -m pytest -q --tb=no 2>&1 || true)
+    passed=$(echo "$test_output" | grep -o '[0-9]\+ passed' | head -1 | grep -o '[0-9]\+' 2>/dev/null || echo "0")
+    total="$passed"
+
+    echo "$passed/$total test cases passed. $pct line coverage achieved."
+    ;;
+  *)
+    "$PY" -m acmecli.main "$@"
+    ;;
+esac

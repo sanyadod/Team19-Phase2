@@ -1,0 +1,63 @@
+[build-system]
+requires = ["setuptools>=45", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+exclude = ["test_artifacts*", "tests*"]
+
+[project]
+name = "acmecli"
+version = "0.1.0"
+requires-python = ">=3.8"
+dependencies = ["requests>=2.32.0", "tqdm>=4.66.0", "orjson>=3.10.0"]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.0",
+  "coverage[toml]>=7.6",
+  "flake8>=7.0",
+  "isort>=5.13",
+  "mypy>=1.10",
+  "types-requests",
+  "black>=24.0",
+  "pre-commit>=3.5"
+]
+
+# ---- Formatting / Linting config ----
+
+[tool.black]
+line-length = 100
+target-version = ["py38"]
+
+[tool.isort]
+profile = "black"
+line_length = 100
+
+# flake8 is configured in .flake8 file to ensure CI picks it up consistently.
+
+# ---- Coverage ----
+[tool.coverage.run]
+branch = true
+source = ["acmecli"]
+
+[tool.coverage.report]
+fail_under = 80
+show_missing = true
+
+# ---- mypy ----
+[tool.mypy]
+python_version = "3.12"
+warn_unused_ignores = true
+strict = true
+ignore_missing_imports = false
+
+[[tool.mypy.overrides]]
+module = ["numpy", "torch", "torch.*"]
+ignore_missing_imports = true
+
+# ---- pytest ----
+[tool.pytest.ini_options]
+addopts = "-q"
+testpaths = ["tests"]
+pythonpath = ["."]
+import-mode = "importlib"
