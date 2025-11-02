@@ -1,0 +1,4 @@
+https://huggingface.co/gpt2
+https://huggingface.co/bert-base-uncased
+https://huggingface.co/openai/whisper-tiny
+
