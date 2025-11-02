@@ -5,7 +5,6 @@ HuggingFace API Integration for Real-Time Model Analysis
 """
 
 from __future__ import annotations
-
 import logging
 import math
 import time
@@ -356,12 +355,30 @@ def estimate_dataset_presence(model_info: Dict[str, Any]) -> bool:
     if isinstance(tags, list):
         for tag in tags:
             if isinstance(tag, str) and any(
-                w in tag.lower() for w in ["dataset", "datasets", "data", "training data"]
+                kw in tag.lower()
+                for kw in ["dataset", "datasets", "data", "training data"]
             ):
                 return True
+
     card = str(model_info.get("cardData", {})).lower()
-    if any(w in card for w in ["dataset", "training data", "pretraining data"]):
+
+    known_sources = [
+        "huggingface.co/datasets",
+        "kaggle.com",
+        "openml.org",
+        "paperswithcode.com/dataset",
+        "data.gov",
+    ]
+    if any(src in card for src in known_sources):
         return True
+        
+    known_datasets = [
+        "imagenet", "cifar", "mnist", "squad", "coco",
+        "glue", "wikitext", "sst-2", "commonsenseqa"
+    ]
+    if any(name in card for name in known_datasets):
+        return True
+
     return False
 
 
