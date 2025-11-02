@@ -1,0 +1,16 @@
+Metadata-Version: 2.4
+Name: acmecli
+Version: 0.1.0
+Requires-Python: >=3.8
+Requires-Dist: requests>=2.32.0
+Requires-Dist: tqdm>=4.66.0
+Requires-Dist: orjson>=3.10.0
+Provides-Extra: dev
+Requires-Dist: pytest>=8.0; extra == "dev"
+Requires-Dist: coverage[toml]>=7.6; extra == "dev"
+Requires-Dist: flake8>=7.0; extra == "dev"
+Requires-Dist: isort>=5.13; extra == "dev"
+Requires-Dist: mypy>=1.10; extra == "dev"
+Requires-Dist: types-requests; extra == "dev"
+Requires-Dist: black>=24.0; extra == "dev"
+Requires-Dist: pre-commit>=3.5; extra == "dev"
