@@ -168,5 +168,5 @@ def download_artifact(artifact_type, artifact_id):
 
 
 if __name__ == "__main__":
-    # run Flask locally
+    #  Flask run locally
     app.run(host="0.0.0.0", port=5001, debug=True)
