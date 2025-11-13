@@ -1,1 +1,0 @@
-{"name": "bert-base-uncased", "category": "MODEL", "net_score": 0.7, "ramp_up_time": 0.8, "bus_factor": 0.6, "performance_claims": 0.7, "license": 0.8, "size_score": {"raspberry_pi": 0.4, "jetson_nano": 0.5, "desktop_pc": 0.8, "aws_server": 0.9}, "dataset_and_code_score": 0.8, "dataset_quality": 0.7, "code_quality": 0.8}
