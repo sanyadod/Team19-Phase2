@@ -1,4 +1,0 @@
-flask
-streamlit
-boto3
-requests
