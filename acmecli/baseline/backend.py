@@ -1,11 +1,25 @@
 # acmecli/baseline/backend.py
 
 from flask import Flask
+from flask_cors import CORS
 import acmecli.baseline.download as download_module
 import acmecli.baseline.upload as upload_module
+import acmecli.baseline.reset as reset_module
+import acmecli.baseline.cost as cost_module
 
 # Create a new Flask app
 app = Flask(__name__)
+# Enable CORS for all routes with permissive settings for development
+CORS(app, resources={r"/*": {"origins": "*", "methods": ["GET", "POST", "PUT", "DELETE", "OPTIONS"], "allow_headers": ["Content-Type", "X-Authorization"]}})
+
+# GET /health
+@app.route("/health", methods=["GET"])
+def health():
+    """
+    Heartbeat check (BASELINE)
+    Lightweight liveness probe. Returns HTTP 200 when the registry API is reachable.
+    """
+    return "", 200
 
 # Register all routes from download.py
 for rule in download_module.app.url_map.iter_rules():
@@ -13,7 +27,7 @@ for rule in download_module.app.url_map.iter_rules():
     if rule.endpoint != 'static':
         app.add_url_rule(
             rule.rule,
-            endpoint=rule.endpoint,
+            endpoint=f"download_{rule.endpoint}",  # Prefix to avoid conflicts
             view_func=download_module.app.view_functions[rule.endpoint],
             methods=rule.methods
         )
@@ -24,8 +38,30 @@ for rule in upload_module.app.url_map.iter_rules():
     if rule.endpoint != 'static':
         app.add_url_rule(
             rule.rule,
-            endpoint=rule.endpoint,
+            endpoint=f"upload_{rule.endpoint}",  # Prefix to avoid conflicts
             view_func=upload_module.app.view_functions[rule.endpoint],
+            methods=rule.methods
+        )
+
+# Register all routes from reset.py
+for rule in reset_module.app.url_map.iter_rules():
+    # Skip the static route
+    if rule.endpoint != 'static':
+        app.add_url_rule(
+            rule.rule,
+            endpoint=f"reset_{rule.endpoint}",  # Prefix to avoid conflicts
+            view_func=reset_module.app.view_functions[rule.endpoint],
+            methods=rule.methods
+        )
+
+# Register all routes from cost.py
+for rule in cost_module.app.url_map.iter_rules():
+    # Skip the static route
+    if rule.endpoint != 'static':
+        app.add_url_rule(
+            rule.rule,
+            endpoint=f"cost_{rule.endpoint}",  # Prefix to avoid conflicts
+            view_func=cost_module.app.view_functions[rule.endpoint],
             methods=rule.methods
         )
 
