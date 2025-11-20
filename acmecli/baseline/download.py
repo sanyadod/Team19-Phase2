@@ -1,172 +1,107 @@
-from flask import Flask, request, Response, abort, jsonify
+from flask import Flask, request, abort, jsonify
 import boto3
 from botocore.exceptions import ClientError
+import logging
 
 app = Flask(__name__)
+logger = logging.getLogger(__name__)
 
-# --- CONFIG ---
-S3_BUCKET = "ece-registry"
-s3_client = boto3.client("s3")
+AWS_REGION = "us-east-1"
+S3_BUCKET_DEFAULT = "ece-registry"
+S3_CLIENT = boto3.client("s3", region_name=AWS_REGION)
 
-# mapping from ?part= to the filename we expect in S3
-PART_TO_FILENAME = {
-    "all": "full_package.zip",
-    "weights": "weights.bin",
-    "dataset": "dataset_subset.zip",
-}
+DYNAMODB = boto3.resource("dynamodb", region_name=AWS_REGION)
+META_TABLE = DYNAMODB.Table("artifact") 
 
-
-def _filename_for_part(part: str) -> str:
-    filename = PART_TO_FILENAME.get(part)
-    if filename is None:
-        abort(400, description="invalid part. must be one of: all, weights, dataset")
-    return filename
-
-
-def check_file_exists(bucket, key):
-    """
-    Check if a file exists in S3 without downloading it.
-    Returns True if exists, False otherwise.
-    """
-    try:
-        s3_client.head_object(Bucket=bucket, Key=key)
-        return True
-    except ClientError as e:
-        code = e.response.get("Error", {}).get("Code", "")
-        if code in ("NoSuchKey", "404", "NotFound"):
-            return False
-        # For other errors, assume it doesn't exist
-        return False
-
-
-def resolve_s3_key(artifact_type: str, artifact_id: str, part: str) -> str:
-
-    filename = _filename_for_part(part)
-
-    candidate_keys = []
-    if artifact_id and artifact_id not in ("_", "-"):
-        candidate_keys.append(f"{artifact_type}/{artifact_id}/{filename}")
-    # Always try flat layout as well
-    candidate_keys.append(f"{artifact_type}/{filename}")
-
-    for key in candidate_keys:
-        if check_file_exists(S3_BUCKET, key):
-            return key
-
-    abort(404, description="file not found in object store")
-
-
-def fetch_s3_object(bucket, key):
-    try:
-        obj = s3_client.get_object(Bucket=bucket, Key=key)
-    except ClientError as e:
-        # If the object doesn't exist or bucket/key wrong -> 404
-        code = e.response.get("Error", {}).get("Code", "")
-        if code in ("NoSuchKey", "404", "NotFound"):
-            abort(404, description="file not found in object store")
-        # anything else -> 500
-        abort(500, description="storage error")
-    body_bytes = obj["Body"].read()
-    download_name = key.split("/")[-1]
-    return body_bytes, download_name
-
-
-# ---- Swagger-compatible JSON endpoint ----
 VALID_TYPES = {"model", "dataset", "code"}
-SWAGGER_TO_S3_PREFIX = {
-    "model": "models",  
-    "dataset": "dataset",
-    "code": "code",
-}
 
 
-def _stable_positive_int_from_string(value: str) -> int:
-    return (hash(value) & 0x7FFFFFFF)
-
-
-@app.route("/artifacts/<artifact_type>/<artifact_id>", methods=["GET"])
-def get_artifact_info(artifact_type, artifact_id):
-    """
-    GET /artifacts/{artifact_type}/{id}
-
-    Returns JSON with metadata and a URL pointing to the existing download endpoint.
-    Requires X-Authorization header. Valid artifact_type values: model, dataset, code
-    """
-
-    # Auth check per Swagger (presence is sufficient for baseline)
+def _require_auth() -> str:
     token = request.headers.get("X-Authorization")
-    if not token:
+    if not token or not token.strip():
         abort(403, description="Authentication failed due to invalid or missing AuthenticationToken.")
+    return token
 
-    # Validate type and id
-    if artifact_type not in VALID_TYPES or not artifact_id:
+
+def _valid_type(artifact_type: str) -> bool:
+    return artifact_type in VALID_TYPES
+
+
+def _valid_id(artifact_id: str) -> bool:
+    if not artifact_id:
+        return False
+    return all(c.isalnum() or c in "-._" for c in artifact_id)
+
+
+def _fetch_metadata(artifact_type: str, artifact_id: str) -> dict:
+    """Read artifact metadata from DynamoDB."""
+    try:
+        resp = META_TABLE.get_item(Key={"id": artifact_id})
+    except ClientError as e:
+        logger.error("DynamoDB get_item failed: %s", e, exc_info=True)
+        abort(500, description="The artifact storage encountered an error.")
+
+    item = resp.get("Item")
+    if not item:
+        abort(404, description="Artifact does not exist.")
+
+    if item.get("artifact_type") != artifact_type:
+        # type/id mismatch
+        abort(404, description="Artifact does not exist.")
+
+    return item
+
+
+def _generate_presigned_url(bucket: str, key: str) -> str:
+    """Create a temporary URL for downloading the object from S3."""
+    try:
+        url = S3_CLIENT.generate_presigned_url(
+            "get_object",
+            Params={"Bucket": bucket, "Key": key},
+            ExpiresIn=3600,  # 1 hour
+        )
+        return url
+    except ClientError as e:
+        logger.error("Error generating presigned URL: %s", e, exc_info=True)
+        abort(500, description="The artifact storage encountered an error.")
+
+
+@app.get("/artifacts/<artifact_type>/<artifact_id>")
+def get_artifact(artifact_type: str, artifact_id: str):
+    """
+    BASELINE: Return artifact metadata and a URL (not raw bytes)
+    """
+    # 403 on missing/invalid auth
+    _require_auth()
+
+    # 400 on bad type/id
+    if not _valid_type(artifact_type) or not _valid_id(artifact_id):
         abort(
             400,
-            description=(
-                "There is missing field(s) in the artifact_type or artifact_id or it is formed improperly, or is invalid."
-            ),
-        )
+            description="There is missing field(s) in the artifact_type or artifact_id ")
 
-    # Map swagger type to actual S3 prefix used by the bucket
-    s3_prefix = SWAGGER_TO_S3_PREFIX.get(artifact_type, artifact_type)
-    resolved_key = resolve_s3_key(s3_prefix, artifact_id, part="all")
+    # 404 if artifact not found
+    meta = _fetch_metadata(artifact_type, artifact_id)
 
-    # Build a downloadable HTTP URL to our existing downloader
-    # Use request.host_url to construct absolute URL
-    base = request.host_url.rstrip("/")
-    # Use the original swagger-visible type in URL path for consistency? The downloader expects S3 prefix.
-    # The downloader route uses /artifact/<artifact_type>/<artifact_id>/download where artifact_type is the S3 prefix.
-    download_url = f"{base}/artifact/{s3_prefix}/{artifact_id}/download?part=all"
+    bucket = meta.get("s3_bucket", S3_BUCKET_DEFAULT)
+    key = meta["s3_key"]  # e.g. "model/bert.zip"
+    filename = meta.get("filename", artifact_id)
 
-    response_body = {
+    url = _generate_presigned_url(bucket, key)
+
+    body = {
         "metadata": {
-            "name": artifact_id,
-            "id": _stable_positive_int_from_string(artifact_id),
+            "name": filename,         
+            "id": artifact_id,
             "type": artifact_type,
         },
         "data": {
-            # Prefer HTTP link to trigger file download via our existing endpoint
-            "url": download_url,
-            # Optionally include the resolved storage key for debugging/traceability (not in swagger schema):
-            # "storage_key": resolved_key,
+            "url": url,               
         },
     }
 
-    return jsonify(response_body), 200
-
-
-@app.route("/artifact/<artifact_type>/<artifact_id>/download", methods=["GET"])
-def download_artifact(artifact_type, artifact_id):
-    """
-    GET /artifact/<artifact_type>/<artifact_id>/download?part=all|weights|dataset
-
-    - artifact_type: e.g., 'models', 'dataset', or 'code'
-    - artifact_id: unique string ID for that artifact (optional for flat layout)
-    - part:
-        all      -> full_package.zip
-        weights  -> weights.bin
-        dataset  -> dataset_subset.zip
-    """
-
-    # default ?part=all
-    part = request.args.get("part", "all")
-
-    # resolve key dynamically (nested or flat)
-    s3_key = resolve_s3_key(artifact_type, artifact_id, part)
-
-    # pull from S3
-    file_bytes, filename = fetch_s3_object(S3_BUCKET, s3_key)
-
-    # send it back
-    resp = Response(
-        file_bytes,
-        mimetype="application/octet-stream",
-        direct_passthrough=True,
-    )
-    resp.headers["Content-Disposition"] = f'attachment; filename="{filename}"'
-    return resp
-
+    return jsonify(body), 200
 
 if __name__ == "__main__":
-    #  Flask run locally
+    logging.basicConfig(level=logging.INFO)
     app.run(host="0.0.0.0", port=5001, debug=True)
