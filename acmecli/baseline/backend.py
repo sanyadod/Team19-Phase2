@@ -6,6 +6,9 @@ import acmecli.baseline.download as download_module
 import acmecli.baseline.upload as upload_module
 import acmecli.baseline.reset as reset_module
 import acmecli.baseline.cost as cost_module
+import acmecli.baseline.rate as rate_module
+import acmecli.baseline.search as search_module
+
 
 # Create a new Flask app
 app = Flask(__name__)
@@ -62,6 +65,26 @@ for rule in cost_module.app.url_map.iter_rules():
             rule.rule,
             endpoint=f"cost_{rule.endpoint}",  # Prefix to avoid conflicts
             view_func=cost_module.app.view_functions[rule.endpoint],
+            methods=rule.methods
+        )
+
+# Register /rate routes
+for rule in rate_module.app.url_map.iter_rules():
+    if rule.endpoint != 'static':
+        app.add_url_rule(
+            rule.rule,
+            endpoint=f"rate_{rule.endpoint}",
+            view_func=rate_module.app.view_functions[rule.endpoint],
+            methods=rule.methods
+        )
+
+# Register /search routes
+for rule in search_module.app.url_map.iter_rules():
+    if rule.endpoint != 'static':
+        app.add_url_rule(
+            rule.rule,
+            endpoint=f"search_{rule.endpoint}",
+            view_func=search_module.app.view_functions[rule.endpoint],
             methods=rule.methods
         )
 
