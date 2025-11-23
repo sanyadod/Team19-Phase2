@@ -157,7 +157,7 @@ def create_artifact(artifact_type: str):
       }
     """
     # 403 on missing/invalid auth
-    _require_auth()
+    #_require_auth()
     
     # Validate artifact_type (category) - must be one of: model, dataset, or code
     # This determines which S3 folder the artifact will be stored in
