@@ -278,13 +278,16 @@ def get_artifact(artifact_type: str, artifact_id: str):
     bucket = meta.get("s3_bucket", S3_BUCKET_DEFAULT)
     key = meta["s3_key"]  # e.g. "model/bert.zip"
     filename = meta.get("filename", artifact_id)
+    source_url = meta.get("source_url", "")
     
     logger.info("S3 location: bucket=%s, key=%s, filename=%s", bucket, key, filename)
-    logger.info("Metadata retrieved: size_bytes=%s, sha256=%s", 
-                meta.get("size_bytes", "unknown"), meta.get("sha256", "unknown")[:16] + "..." if meta.get("sha256") else "unknown")
+    logger.info("Metadata retrieved: size_bytes=%s, sha256=%s, source_url=%s", 
+                meta.get("size_bytes", "unknown"), 
+                meta.get("sha256", "unknown")[:16] + "..." if meta.get("sha256") else "unknown",
+                source_url)
 
     logger.info("Generating presigned URL for S3 object")
-    url = _generate_presigned_url(bucket, key)
+    presigned_url = _generate_presigned_url(bucket, key)
 
     body = {
         "metadata": {
@@ -293,13 +296,14 @@ def get_artifact(artifact_type: str, artifact_id: str):
             "type": artifact_type,
         },
         "data": {
-            "url": url,               
+            "url": source_url,  # Original source URL used during ingest
+            "download_url": presigned_url,  # Presigned URL for downloading
         },
     }
 
-    logger.info("GET /artifacts/%s/%s completed successfully: artifact retrieved, filename=%s, presigned_url_length=%d",
-                artifact_type, artifact_id, filename, len(url))
-    logger.debug("Response body metadata: name=%s, id=%s, type=%s", filename, artifact_id, artifact_type)
+    logger.info("GET /artifacts/%s/%s completed successfully: artifact retrieved, filename=%s, source_url=%s, presigned_url_length=%d",
+                artifact_type, artifact_id, filename, source_url, len(presigned_url))
+    logger.debug("Response body metadata: name=%s, id=%s, type=%s, source_url=%s", filename, artifact_id, artifact_type, source_url)
 
     return jsonify(body), 200
 

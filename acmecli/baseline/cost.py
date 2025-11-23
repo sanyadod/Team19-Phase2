@@ -109,7 +109,9 @@ def _find_s3_key_and_size(artifact_type: str, artifact_id: str):
         logger.error("Error message: %s", e.response.get("Error", {}).get("Message", "Unknown"))
         abort(500, description="The artifact cost calculator encountered an error.")
 
-    size_bytes = head.get("ContentLength", 0)
+    content_length = head.get("ContentLength", 0)
+    # Ensure ContentLength is converted to int (handles cases where it might be Unset or other types)
+    size_bytes = int(content_length) if content_length is not None else 0
     logger.info("S3 object size: %d bytes (%.2f MB)", size_bytes, size_bytes / (1024 * 1024))
     
     if size_bytes <= 0:
