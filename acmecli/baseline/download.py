@@ -297,15 +297,13 @@ def list_artifacts():
         logger.error("Unexpected error listing artifacts: %s", e, exc_info=True)
         abort(500, description="The artifact storage encountered an error.")
 
-
 @app.get("/artifacts/<artifact_type>/<artifact_id>")
 def get_artifact(artifact_type: str, artifact_id: str):
     """
-    BASELINE: Return artifact metadata and a URL (not raw bytes).
+    BASELINE: Return artifact metadata and a URL + download_url (not raw bytes).
     """
 
-    # If you later need auth, uncomment:
-    # _require_auth()
+    # _require_auth()   # still disabled
 
     # 400 on bad type/id
     if not _valid_type(artifact_type):
@@ -336,39 +334,13 @@ def get_artifact(artifact_type: str, artifact_id: str):
     source_url = meta.get("source_url", "")
 
     # Use ID and type from DynamoDB to ensure consistency
-    raw_id = meta.get("id", artifact_id)
-    try:
-        db_artifact_id = int(raw_id)
-    except (TypeError, ValueError):
-        db_artifact_id = raw_id
+    db_artifact_id = meta.get("id", artifact_id)          # <- keep original type
+    db_artifact_type = meta.get("artifact_type", artifact_type)
 
-    db_artifact_type = str(meta.get("artifact_type", artifact_type))
+    # 🔴 ALWAYS generate a presigned download URL
+    presigned_url = _generate_presigned_url(bucket, key)
 
-    # Generate presigned URL for download_url (per OpenAPI spec)
-    try:
-        presigned_url = _generate_presigned_url(bucket, key)
-        
-        # Validate presigned URL
-        if not presigned_url or not isinstance(presigned_url, str) or not presigned_url.startswith("https://"):
-            logger.error(
-                "Invalid presigned URL: type=%s, value=%s, bucket=%s, key=%s",
-                type(presigned_url),
-                presigned_url,
-                bucket,
-                key,
-            )
-            abort(500, description="The artifact storage encountered an error.")
-    except Exception as e:
-        logger.error(
-            "Failed to generate presigned URL: bucket=%s, key=%s, error=%s",
-            bucket,
-            key,
-            e,
-            exc_info=True,
-        )
-        abort(500, description="The artifact storage encountered an error.")
-
-    # Include both url and download_url per OpenAPI spec
+    # 🔴 data MUST contain both url and download_url
     data = {
         "url": source_url,
         "download_url": presigned_url,
@@ -383,7 +355,7 @@ def get_artifact(artifact_type: str, artifact_id: str):
         "data": data,
     }
 
-    # Basic validation of response structure
+    # Basic validation
     if "metadata" not in body or "data" not in body:
         logger.error("Invalid response structure: %s", body)
         abort(500, description="The artifact storage encountered an error.")
