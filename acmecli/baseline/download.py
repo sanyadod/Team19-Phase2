@@ -164,8 +164,8 @@ def list_artifacts():
             query_types = query.get("types", [])
             logger.info("Query #%d details: name='%s', types=%s", idx + 1, query_name, query_types)
             
-            matches_for_query = 0
-            # Filter by query
+            # Filter by query - find exact match and return only one result per query
+            found_match = False
             for item in all_items:
                 artifact_type = item.get("artifact_type", "")
                 artifact_name = item.get("filename", "")
@@ -175,16 +175,23 @@ def list_artifacts():
                 if query_types and artifact_type not in query_types:
                     continue
                 
-                # Match by name: "*" means all, otherwise exact or partial match
-                if query_name == "*" or query_name.lower() in artifact_name.lower():
+                # Match by name: "*" means all, otherwise exact match only
+                if query_name == "*":
                     results.append({
                         "name": artifact_name,
                         "id": artifact_id,
                         "type": artifact_type,
                     })
-                    matches_for_query += 1
+                elif query_name == artifact_name:  # Exact match only
+                    results.append({
+                        "name": artifact_name,
+                        "id": artifact_id,
+                        "type": artifact_type,
+                    })
+                    found_match = True
+                    break  # Only return first exact match
             
-            logger.info("Query #%d matched %d artifacts", idx + 1, matches_for_query)
+            logger.info("Query #%d matched: found_match=%s", idx + 1, found_match if query_name != "*" else "N/A (wildcard)")
         
         logger.info("Total matches before deduplication: %d", len(results))
         
