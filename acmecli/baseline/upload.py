@@ -6,31 +6,68 @@ import json
 import time
 import hashlib
 import zipfile
-from typing import Dict, Any
+import logging
+from typing import Dict, Any, Optional
+from urllib.parse import urlparse
 
 from flask import Flask, request, jsonify, abort
 import boto3
 from botocore.exceptions import ClientError
+import requests
 
 app = Flask(__name__)
+logger = logging.getLogger(__name__)
 
 # --- CONFIG ---
-S3_BUCKET = "ece-registry"
+S3_BUCKET_DEFAULT = "ece-registry"
 AWS_REGION = "us-east-1"
-PRESIGNED_EXPIRES_IN = 3600  # seconds
 MAX_UNCOMPRESSED_BYTES = 200 * 1024 * 1024  # 200 MB
 
-s3_client = boto3.client("s3", region_name=AWS_REGION)
+S3_CLIENT = boto3.client("s3", region_name=AWS_REGION)
+DYNAMODB = boto3.resource("dynamodb", region_name=AWS_REGION)
+META_TABLE = DYNAMODB.Table("artifact")
 
-# Optional: allow only these top-level prefixes (aligns with your bucket layout)
-ALLOWED_TOP_LEVEL_PREFIXES = {"models", "models2"}
+# Valid artifact categories - determines which S3 folder artifacts are stored in:
+# - "model" -> stored in model/ folder
+# - "dataset" -> stored in dataset/ folder  
+# - "code" -> stored in code/ folder
+VALID_TYPES = {"model", "dataset", "code"}
 
 
-def _require_auth() -> None:
+def _require_auth() -> str:
     """Baseline check mirroring download.py's swagger auth style."""
     token = request.headers.get("X-Authorization")
-    if not token:
+    if not token or not token.strip():
         abort(403, description="Authentication failed due to invalid or missing AuthenticationToken.")
+    return token
+
+
+def _valid_type(artifact_type: str) -> bool:
+    return artifact_type in VALID_TYPES
+
+
+def _valid_id(artifact_id: str) -> bool:
+    if not artifact_id:
+        return False
+    return all(c.isalnum() or c in "-._" for c in artifact_id)
+
+
+def _generate_artifact_id() -> str:
+    """Generate a unique artifact ID (numeric string)."""
+    # Use timestamp-based ID similar to examples in spec
+    return str(int(time.time() * 1000))
+
+
+def _extract_name_from_url(url: str) -> str:
+    """Extract a reasonable name from a URL."""
+    parsed = urlparse(url)
+    path = parsed.path.rstrip("/")
+    # Get the last segment of the path
+    name = path.split("/")[-1] if path else "artifact"
+    # Remove common extensions
+    if "." in name:
+        name = name.rsplit(".", 1)[0]
+    return name or "artifact"
 
 
 def _safe_zip_check(blob: bytes) -> None:
@@ -47,152 +84,178 @@ def _safe_zip_check(blob: bytes) -> None:
                 raise ValueError("Zip appears too large when extracted (possible zip bomb).")
 
 
-def _head_exists(bucket: str, key: str) -> bool:
+def _download_and_store(url: str, s3_key: str, bucket: str = S3_BUCKET_DEFAULT) -> tuple[int, str]:
+    """Download from URL and store in S3. Returns (size_bytes, sha256)."""
     try:
-        s3_client.head_object(Bucket=bucket, Key=key)
-        return True
-    except ClientError as e:
-        code = e.response.get("Error", {}).get("Code", "")
-        if code in ("NoSuchKey", "404", "NotFound"):
-            return False
-        return False
-
-
-@app.route("/upload/initiate", methods=["POST"])
-def initiate_upload():
-    """
-    POST /upload/initiate
-    JSON body:
-      {
-        "target_prefix": "models",           # top-level folder in S3 (e.g., models/models2)
-        "model_name": "org/model",           # required
-        "version": "1.0.0",                  # required
-        "content_type": "application/zip"    # optional, defaults to zip
-      }
-
-    Returns a presigned PUT URL for direct upload to S3 + the S3 key we expect.
-    """
-    _require_auth()
-
-    try:
-        payload: Dict[str, Any] = request.get_json(force=True)
-    except Exception:
-        abort(400, description="Invalid JSON payload.")
-
-    target_prefix = str(payload.get("target_prefix", "")).strip() or "models"
-    if target_prefix not in ALLOWED_TOP_LEVEL_PREFIXES:
-        abort(400, description=f"invalid target_prefix; allowed: {sorted(ALLOWED_TOP_LEVEL_PREFIXES)}")
-
-    model_name = str(payload.get("model_name", "")).strip()
-    version = str(payload.get("version", "")).strip()
-
-    if not model_name or "/" not in model_name:
-        abort(400, description="model_name must be like 'org/model'.")
-    if not version:
-        abort(400, description="version is required.")
-
-    org, name = model_name.split("/", 1)
-    key = f"{target_prefix}/{org}/{name}/{version}/model.zip"
-
-    # If something already exists at that key, refuse (idempotency/safety)
-    if _head_exists(S3_BUCKET, key):
-        abort(409, description="An object already exists at this location.")
-
-    content_type = payload.get("content_type", "application/zip")
-    try:
-        url = s3_client.generate_presigned_url(
-            ClientMethod="put_object",
-            Params={"Bucket": S3_BUCKET, "Key": key, "ContentType": content_type},
-            ExpiresIn=PRESIGNED_EXPIRES_IN,
-        )
-    except ClientError:
-        abort(500, description="Failed to generate presigned URL.")
-
-    upload_id = f"ul_{int(time.time()*1000)}"
-    resp = {
-        "upload_id": upload_id,
-        "s3_key": key,
-        "presigned_url": url,
-        "expires_in": PRESIGNED_EXPIRES_IN,
-    }
-    return jsonify(resp), 200
-
-
-@app.route("/upload/complete", methods=["POST"])
-def complete_upload():
-    """
-    POST /upload/complete
-    JSON body:
-      {
-        "s3_key": "models/org/name/1.0.0/model.zip",  # required (from /initiate)
-        "expected_sha256": "<hex>",                   # optional (client-calculated)
-        "validate_zip": true                          # optional (default true)
-      }
-
-    Verifies the object exists (HEAD), optionally validates sha256 and zip safety,
-    and returns metadata.
-    """
-    _require_auth()
-
-    try:
-        payload: Dict[str, Any] = request.get_json(force=True)
-    except Exception:
-        abort(400, description="Invalid JSON payload.")
-
-    s3_key = str(payload.get("s3_key", "")).strip()
-    if not s3_key:
-        abort(400, description="s3_key is required.")
-
-    validate_zip = bool(payload.get("validate_zip", True))
-    expected_sha256 = payload.get("expected_sha256")
-
-    # Check that object exists
-    try:
-        head = s3_client.head_object(Bucket=S3_BUCKET, Key=s3_key)
-    except ClientError as e:
-        code = e.response.get("Error", {}).get("Code", "")
-        if code in ("NoSuchKey", "404", "NotFound"):
-            abort(404, description="file not found in object store")
-        abort(500, description="storage error")
-
-    size = int(head.get("ContentLength", 0))
-    etag = head.get("ETag", "").strip('"')
-
-    # Optionally download object to validate hash/zip
-    computed_sha256 = None
-    if validate_zip or expected_sha256:
-        try:
-            obj = s3_client.get_object(Bucket=S3_BUCKET, Key=s3_key)
-            blob = obj["Body"].read()
-        except ClientError as e:
-            code = e.response.get("Error", {}).get("Code", "")
-            if code in ("NoSuchKey", "404", "NotFound"):
-                abort(404, description="file not found in object store")
-            abort(500, description="storage error")
-
-        computed_sha256 = hashlib.sha256(blob).hexdigest()
-
-        if expected_sha256 and computed_sha256 != expected_sha256:
-            abort(400, description="SHA-256 digest mismatch.")
-
-        if validate_zip:
+        response = requests.get(url, timeout=300, stream=True)
+        response.raise_for_status()
+        
+        blob = response.content
+        size = len(blob)
+        sha256 = hashlib.sha256(blob).hexdigest()
+        
+        # Validate zip if it appears to be a zip
+        if url.endswith(".zip") or "zip" in response.headers.get("Content-Type", "").lower():
             try:
                 _safe_zip_check(blob)
             except ValueError as ve:
-                abort(400, description=f"ZIP validation failed: {ve}")
+                logger.warning(f"ZIP validation warning for {url}: {ve}")
+        
+        # Upload to S3
+        S3_CLIENT.put_object(
+            Bucket=bucket,
+            Key=s3_key,
+            Body=blob,
+            ContentType=response.headers.get("Content-Type", "application/octet-stream")
+        )
+        
+        return size, sha256
+    except requests.RequestException as e:
+        logger.error(f"Failed to download from {url}: {e}", exc_info=True)
+        abort(500, description="Failed to download artifact from source URL.")
+    except ClientError as e:
+        logger.error(f"Failed to upload to S3: {e}", exc_info=True)
+        abort(500, description="The artifact storage encountered an error.")
 
-    # Minimal structured response; sidecar/DB can be added later
+
+def _check_artifact_exists(artifact_id: str) -> bool:
+    """Check if artifact already exists in DynamoDB."""
+    try:
+        resp = META_TABLE.get_item(Key={"id": artifact_id})
+        return "Item" in resp
+    except ClientError:
+        return False
+
+
+@app.post("/artifact/<artifact_type>")
+def create_artifact(artifact_type: str):
+    """
+    POST /artifact/{artifact_type}
+    Register a new artifact by providing a downloadable source url.
+    
+    The artifact_type in the URL path determines the category and S3 folder:
+    - "model" -> stores in S3 folder: model/
+    - "dataset" -> stores in S3 folder: dataset/
+    - "code" -> stores in S3 folder: code/
+    
+    Request body:
+      {
+        "url": "https://huggingface.co/google-bert/bert-base-uncased"
+      }
+    
+    Returns:
+      {
+        "metadata": {
+          "name": "bert-base-uncased",
+          "id": "9078563412",
+          "type": "model"
+        },
+        "data": {
+          "url": "https://huggingface.co/google-bert/bert-base-uncased",
+          "download_url": "https://ec2-10-121-34-12/download/bert-base-uncased"
+        }
+      }
+    """
+    # 403 on missing/invalid auth
+    _require_auth()
+    
+    # Validate artifact_type (category) - must be one of: model, dataset, or code
+    # This determines which S3 folder the artifact will be stored in
+    if not _valid_type(artifact_type):
+        abort(400, description="There is missing field(s) in the artifact_type or artifact_id or it is formed improperly, or is invalid.")
+    
+    logger.info(f"Creating artifact of type: {artifact_type} (will be stored in {artifact_type}/ folder)")
+    
+    # Parse request body
+    try:
+        payload: Dict[str, Any] = request.get_json(force=True)
+    except Exception:
+        abort(400, description="There is missing field(s) in the artifact_data or it is formed improperly (must include a single url).")
+    
+    if not payload or "url" not in payload:
+        abort(400, description="There is missing field(s) in the artifact_data or it is formed improperly (must include a single url).")
+    
+    source_url = str(payload["url"]).strip()
+    if not source_url:
+        abort(400, description="There is missing field(s) in the artifact_data or it is formed improperly (must include a single url).")
+    
+    # Generate unique artifact ID
+    artifact_id = _generate_artifact_id()
+    # Ensure uniqueness (retry if collision, though unlikely)
+    max_retries = 10
+    for _ in range(max_retries):
+        if not _check_artifact_exists(artifact_id):
+            break
+        artifact_id = _generate_artifact_id()
+    else:
+        abort(500, description="Failed to generate unique artifact ID.")
+    
+    # Extract name from URL
+    artifact_name = _extract_name_from_url(source_url)
+    
+    # Determine S3 key based on artifact_type (category)
+    # This ensures artifacts are organized in separate folders: model/, dataset/, or code/
+    s3_key = f"{artifact_type}/{artifact_id}.zip"
+    logger.info(f"Storing artifact in S3 at: {s3_key} (category: {artifact_type})")
+    
+    # Download and store in S3
+    try:
+        size_bytes, sha256 = _download_and_store(source_url, s3_key)
+    except Exception as e:
+        logger.error(f"Error downloading/storing artifact: {e}", exc_info=True)
+        abort(500, description="The artifact storage encountered an error.")
+    
+    # Store metadata in DynamoDB
+    try:
+        META_TABLE.put_item(
+            Item={
+                "id": artifact_id,
+                "artifact_type": artifact_type,
+                "s3_bucket": S3_BUCKET_DEFAULT,
+                "s3_key": s3_key,
+                "filename": artifact_name,
+                "source_url": source_url,
+                "size_bytes": size_bytes,
+                "sha256": sha256,
+            }
+        )
+    except ClientError as e:
+        logger.error(f"DynamoDB put_item failed: {e}", exc_info=True)
+        # Clean up S3 object if DynamoDB write fails
+        try:
+            S3_CLIENT.delete_object(Bucket=S3_BUCKET_DEFAULT, Key=s3_key)
+        except Exception:
+            pass
+        abort(500, description="The artifact storage encountered an error.")
+    
+    # Generate download URL (presigned URL for S3)
+    try:
+        download_url = S3_CLIENT.generate_presigned_url(
+            "get_object",
+            Params={"Bucket": S3_BUCKET_DEFAULT, "Key": s3_key},
+            ExpiresIn=3600,  # 1 hour
+        )
+    except ClientError as e:
+        logger.error(f"Error generating presigned URL: {e}", exc_info=True)
+        download_url = f"https://{S3_BUCKET_DEFAULT}.s3.{AWS_REGION}.amazonaws.com/{s3_key}"
+    
+    # Return response matching spec
     response_body = {
-        "s3_key": s3_key,
-        "size_bytes": size,
-        "etag": etag,
-        "sha256": computed_sha256 if computed_sha256 else None,
-        "validated": bool(validate_zip),
-        "status": "READY",
+        "metadata": {
+            "name": artifact_name,
+            "id": artifact_id,
+            "type": artifact_type,
+        },
+        "data": {
+            "url": source_url,
+            "download_url": download_url,
+        },
     }
-    return jsonify(response_body), 200
+    
+    return jsonify(response_body), 201
 
 
 if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO)
     # run Flask locally
     app.run(host="0.0.0.0", port=5002, debug=True)
