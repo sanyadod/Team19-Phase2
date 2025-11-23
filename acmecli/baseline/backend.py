@@ -6,6 +6,7 @@ import acmecli.baseline.download as download_module
 import acmecli.baseline.upload as upload_module
 import acmecli.baseline.reset as reset_module
 import acmecli.baseline.cost as cost_module
+import acmecli.baseline.tracks as tracks_module
 
 # Create a new Flask app
 app = Flask(__name__)
@@ -62,6 +63,17 @@ for rule in cost_module.app.url_map.iter_rules():
             rule.rule,
             endpoint=f"cost_{rule.endpoint}",  # Prefix to avoid conflicts
             view_func=cost_module.app.view_functions[rule.endpoint],
+            methods=rule.methods
+        )
+
+# Register all routes from tracks.py
+for rule in tracks_module.app.url_map.iter_rules():
+    # Skip the static route
+    if rule.endpoint != 'static':
+        app.add_url_rule(
+            rule.rule,
+            endpoint=f"tracks_{rule.endpoint}",  # Prefix to avoid conflicts
+            view_func=tracks_module.app.view_functions[rule.endpoint],
             methods=rule.methods
         )
 
