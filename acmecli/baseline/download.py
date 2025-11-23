@@ -344,10 +344,34 @@ def get_artifact(artifact_type: str, artifact_id: str):
 
     db_artifact_type = str(meta.get("artifact_type", artifact_type))
 
-    # For baseline spec, only `url` is required in data.
+    # Generate presigned URL for download_url (per OpenAPI spec)
+    try:
+        presigned_url = _generate_presigned_url(bucket, key)
+        
+        # Validate presigned URL
+        if not presigned_url or not isinstance(presigned_url, str) or not presigned_url.startswith("https://"):
+            logger.error(
+                "Invalid presigned URL: type=%s, value=%s, bucket=%s, key=%s",
+                type(presigned_url),
+                presigned_url,
+                bucket,
+                key,
+            )
+            abort(500, description="The artifact storage encountered an error.")
+    except Exception as e:
+        logger.error(
+            "Failed to generate presigned URL: bucket=%s, key=%s, error=%s",
+            bucket,
+            key,
+            e,
+            exc_info=True,
+        )
+        abort(500, description="The artifact storage encountered an error.")
+
+    # Include both url and download_url per OpenAPI spec
     data = {
         "url": source_url,
-        # If later phases need it, you can add "download_url" here using _generate_presigned_url(bucket, key).
+        "download_url": presigned_url,
     }
 
     body = {
@@ -372,15 +396,16 @@ def get_artifact(artifact_type: str, artifact_id: str):
         logger.error("Invalid metadata: %s", body["metadata"])
         abort(500, description="The artifact storage encountered an error.")
 
-    if "url" not in body["data"]:
+    if "url" not in body["data"] or "download_url" not in body["data"]:
         logger.error("Invalid data: %s", body["data"])
         abort(500, description="The artifact storage encountered an error.")
 
     logger.info(
-        "GET /artifacts/%s/%s: success, id=%s",
+        "GET /artifacts/%s/%s: success, id=%s, download_url_len=%d",
         artifact_type,
         artifact_id,
         db_artifact_id,
+        len(data["download_url"]),
     )
     return jsonify(body), 200
 
