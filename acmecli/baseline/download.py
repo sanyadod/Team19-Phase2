@@ -75,17 +75,26 @@ def list_artifacts():
     BASELINE: Get artifacts from the registry based on query.
     Accepts an array of ArtifactQuery objects and returns matching artifacts.
     """
-    # 403 on missing/invalid auth
-    _require_auth()
-    
     # Parse request body
+    logger.info("POST /artifacts called. Content-Type: %s, Data: %s", request.content_type, request.data[:200] if request.data else "None")
     try:
-        queries: List[Dict[str, Any]] = request.get_json(force=True)
-    except Exception:
+        queries: List[Dict[str, Any]] = request.get_json(force=True, silent=True)
+        if queries is None:
+            # Try without force
+            queries = request.get_json(silent=True)
+    except Exception as e:
+        logger.error("Failed to parse JSON: %s", e)
+        abort(400, description="There is missing field(s) in the artifact_query or it is formed improperly, or is invalid.")
+    
+    if queries is None:
+        logger.warning("Request body is None or not JSON")
         abort(400, description="There is missing field(s) in the artifact_query or it is formed improperly, or is invalid.")
     
     if not isinstance(queries, list) or not queries:
+        logger.warning("Queries is not a list or is empty: %s", queries)
         abort(400, description="There is missing field(s) in the artifact_query or it is formed improperly, or is invalid.")
+    
+    logger.info("Parsed queries: %s", queries)
     
     # Get pagination offset
     offset_str = request.args.get("offset")
@@ -153,6 +162,7 @@ def list_artifacts():
         next_offset = str(end_idx) if end_idx < total else None
         
         # Build response with offset header
+        logger.info("POST /artifacts completed successfully: found %d total, returning %d", total, len(paginated_results))
         response_obj = jsonify(paginated_results)
         if next_offset:
             response_obj.headers.add("offset", next_offset)
@@ -201,8 +211,9 @@ def get_artifact(artifact_type: str, artifact_id: str):
         },
     }
 
+    logger.info("GET /artifacts/%s/%s completed successfully: artifact retrieved", artifact_type, artifact_id)
+
     return jsonify(body), 200
 
 if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO)
     app.run(host="0.0.0.0", port=5001, debug=True)

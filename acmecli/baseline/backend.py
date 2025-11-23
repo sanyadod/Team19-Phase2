@@ -1,5 +1,6 @@
 # acmecli/baseline/backend.py
 
+import logging
 from flask import Flask
 from flask_cors import CORS
 import acmecli.baseline.download as download_module
@@ -7,6 +8,12 @@ import acmecli.baseline.upload as upload_module
 import acmecli.baseline.reset as reset_module
 import acmecli.baseline.cost as cost_module
 import acmecli.baseline.tracks as tracks_module
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
 
 # Create a new Flask app
 app = Flask(__name__)
@@ -79,4 +86,5 @@ for rule in tracks_module.app.url_map.iter_rules():
 
 if __name__ == "__main__":
     # Run the combined backend on port 5001
+    logging.info("Starting Flask backend server on port 5001")
     app.run(host="0.0.0.0", port=5001, debug=True)
