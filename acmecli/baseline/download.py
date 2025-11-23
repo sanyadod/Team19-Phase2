@@ -279,9 +279,13 @@ def get_artifact(artifact_type: str, artifact_id: str):
     key = meta["s3_key"]  # e.g. "model/bert.zip"
     filename = meta.get("filename", artifact_id)
     source_url = meta.get("source_url", "")
+    # Use ID and type from DynamoDB to ensure consistency
+    db_artifact_id = str(meta.get("id", artifact_id))
+    db_artifact_type = str(meta.get("artifact_type", artifact_type))
     
     logger.info("S3 location: bucket=%s, key=%s, filename=%s", bucket, key, filename)
-    logger.info("Metadata retrieved: size_bytes=%s, sha256=%s, source_url=%s", 
+    logger.info("Metadata retrieved: id=%s, type=%s, size_bytes=%s, sha256=%s, source_url=%s", 
+                db_artifact_id, db_artifact_type,
                 meta.get("size_bytes", "unknown"), 
                 meta.get("sha256", "unknown")[:16] + "..." if meta.get("sha256") else "unknown",
                 source_url)
@@ -292,8 +296,8 @@ def get_artifact(artifact_type: str, artifact_id: str):
     body = {
         "metadata": {
             "name": filename,         
-            "id": artifact_id,
-            "type": artifact_type,
+            "id": db_artifact_id,  # Use ID from DynamoDB
+            "type": db_artifact_type,  # Use type from DynamoDB
         },
         "data": {
             "url": source_url,  # Original source URL used during ingest
@@ -306,10 +310,13 @@ def get_artifact(artifact_type: str, artifact_id: str):
     logger.info("Response data: url=%s (length=%d), download_url present=%s (length=%d)",
                 source_url, len(source_url) if source_url else 0, 
                 "yes" if presigned_url else "no", len(presigned_url) if presigned_url else 0)
+    logger.info("Response metadata: id=%s (type=%s), name=%s, type=%s", 
+                db_artifact_id, type(db_artifact_id).__name__, filename, db_artifact_type)
     logger.info("GET /artifacts/%s/%s completed successfully: artifact retrieved, filename=%s, source_url=%s, presigned_url_length=%d",
                 artifact_type, artifact_id, filename, source_url, len(presigned_url))
     logger.debug("Full response body: %s", body)
-    logger.debug("Response body metadata: name=%s, id=%s, type=%s, source_url=%s", filename, artifact_id, artifact_type, source_url)
+    logger.debug("Response body metadata: name=%s, id=%s (from DB), type=%s (from DB), source_url=%s", 
+                filename, db_artifact_id, db_artifact_type, source_url)
 
     return jsonify(body), 200
 
