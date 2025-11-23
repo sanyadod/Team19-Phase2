@@ -48,17 +48,32 @@ def _fetch_metadata(artifact_type: str, artifact_id: str) -> dict:
       s3_key
       ...
     """
+    logger.info("Fetching metadata from DynamoDB for cost calculation: artifact_type=%s, artifact_id=%s", 
+                artifact_type, artifact_id)
+    logger.info("DynamoDB table: %s", META_TABLE.table_name)
+    
     try:
+        logger.info("Calling DynamoDB get_item with key: id=%s", artifact_id)
         resp = META_TABLE.get_item(Key={"id": artifact_id})
+        logger.info("DynamoDB get_item response received: %s", "Item found" if resp.get("Item") else "No item found")
     except ClientError as e:
-        logger.error("DynamoDB get_item failed: %s", e, exc_info=True)
+        logger.error("DynamoDB get_item failed for artifact_id=%s: %s", artifact_id, e, exc_info=True)
+        logger.error("Error code: %s, Error message: %s",
+                    e.response.get("Error", {}).get("Code", "Unknown"),
+                    e.response.get("Error", {}).get("Message", "Unknown"))
         abort(500, description="The artifact cost calculator encountered an error.")
 
     item = resp.get("Item")
     if not item:
+        logger.warning("Artifact not found in DynamoDB: artifact_type=%s, artifact_id=%s", artifact_type, artifact_id)
         abort(404, description="Artifact does not exist.")
 
+    logger.info("Metadata retrieved: artifact_type=%s, s3_bucket=%s, s3_key=%s, filename=%s",
+                item.get("artifact_type"), item.get("s3_bucket"), item.get("s3_key"), item.get("filename"))
+
     if item.get("artifact_type") != artifact_type:
+        logger.warning("Artifact type mismatch: expected=%s, found=%s, artifact_id=%s",
+                      artifact_type, item.get("artifact_type"), artifact_id)
         abort(404, description="Artifact does not exist.")
 
     return item
@@ -69,45 +84,72 @@ def _find_s3_key_and_size(artifact_type: str, artifact_id: str):
     Use DynamoDB metadata to get the correct S3 bucket/key, then head_object
     to retrieve the size.
     """
+    logger.info("Finding S3 key and size for artifact: artifact_type=%s, artifact_id=%s", artifact_type, artifact_id)
     meta = _fetch_metadata(artifact_type, artifact_id)
 
     bucket = meta.get("s3_bucket", S3_BUCKET_DEFAULT)
     key = meta["s3_key"]  # e.g. "model/bert.zip"
+    
+    logger.info("S3 location from metadata: bucket=%s, key=%s", bucket, key)
+    logger.info("Calling S3 head_object to retrieve object size")
 
     try:
         head = s3_client.head_object(Bucket=bucket, Key=key)
+        logger.info("S3 head_object successful: ContentLength=%s bytes, ContentType=%s, LastModified=%s",
+                   head.get("ContentLength", "unknown"),
+                   head.get("ContentType", "unknown"),
+                   head.get("LastModified", "unknown"))
     except ClientError as e:
         code = e.response.get("Error", {}).get("Code", "")
+        logger.error("S3 head_object failed for bucket=%s, key=%s: error_code=%s", bucket, key, code)
         if code in ("NoSuchKey", "404"):
+            logger.warning("S3 object not found: bucket=%s, key=%s", bucket, key)
             abort(404, description="Artifact does not exist.")
-        logger.error("S3 head_object failed: %s", e, exc_info=True)
+        logger.error("S3 head_object error details: %s", e, exc_info=True)
+        logger.error("Error message: %s", e.response.get("Error", {}).get("Message", "Unknown"))
         abort(500, description="The artifact cost calculator encountered an error.")
 
     size_bytes = head.get("ContentLength", 0)
+    logger.info("S3 object size: %d bytes (%.2f MB)", size_bytes, size_bytes / (1024 * 1024))
+    
     if size_bytes <= 0:
-        logger.warning(f"Found artifact with 0 bytes at {bucket}/{key}")
+        logger.warning("Found artifact with 0 bytes at bucket=%s, key=%s", bucket, key)
         abort(404, description="Artifact does not exist or has zero size.")
 
     return key, size_bytes
 
 
 def _get_artifact_size_mb(artifact_type: str, artifact_id: str) -> float:
+    logger.info("Calculating artifact size in MB: artifact_type=%s, artifact_id=%s", artifact_type, artifact_id)
     key, size_bytes = _find_s3_key_and_size(artifact_type, artifact_id)
 
     size_mb = size_bytes / (1024 * 1024)
+    logger.info("Size conversion: %d bytes = %.6f MB (raw)", size_bytes, size_mb)
+    
     if size_mb < 0.01:
-        return round(size_mb, 6)  # small files
+        rounded_size = round(size_mb, 6)  # small files
+        logger.info("Small file (< 0.01 MB): rounding to 6 decimal places = %.6f MB", rounded_size)
+        return rounded_size
     else:
-        return round(size_mb, 2)  # larger files
+        rounded_size = round(size_mb, 2)  # larger files
+        logger.info("Larger file (>= 0.01 MB): rounding to 2 decimal places = %.2f MB", rounded_size)
+        return rounded_size
 
 
 # -------- Endpoint --------
 
 @app.route("/artifact/<artifact_type>/<artifact_id>/cost", methods=["GET"])
 def get_artifact_cost(artifact_type: str, artifact_id: str):
+    logger.info("GET /artifact/%s/%s/cost called", artifact_type, artifact_id)
+    logger.info("Request details: method=GET, path=/artifact/%s/%s/cost", artifact_type, artifact_id)
+    logger.info("Request headers: %s", dict(request.headers))
+    logger.info("Query parameters: %s", dict(request.args))
+    
     #_require_auth()
 
-    if not _valid_type(artifact_type) or not _valid_id(artifact_id):
+    logger.info("Validating artifact_type and artifact_id")
+    if not _valid_type(artifact_type):
+        logger.warning("Invalid artifact_type: %s (valid types: %s)", artifact_type, VALID_TYPES)
         abort(
             400,
             description=(
@@ -115,14 +157,29 @@ def get_artifact_cost(artifact_type: str, artifact_id: str):
                 "or it is formed improperly, or is invalid."
             ),
         )
+    
+    if not _valid_id(artifact_id):
+        logger.warning("Invalid artifact_id: %s (must be alphanumeric with -._ allowed)", artifact_id)
+        abort(
+            400,
+            description=(
+                "There is missing field(s) in the artifact_type or artifact_id "
+                "or it is formed improperly, or is invalid."
+            ),
+        )
+    
+    logger.info("Validation passed: artifact_type=%s, artifact_id=%s", artifact_type, artifact_id)
 
     # parse the dependency flag
     dep_raw = request.args.get("dependency", "false")
     dependency = dep_raw.lower() in ("true", "1", "yes")
+    logger.info("Dependency flag: raw_value=%s, parsed=%s", dep_raw, dependency)
 
     # compute the standalone cost and total cost (here: just size in MB)
+    logger.info("Computing artifact cost (size in MB)")
     standalone_cost = _get_artifact_size_mb(artifact_type, artifact_id)
     total_cost = standalone_cost
+    logger.info("Cost calculation: standalone_cost=%.6f MB, total_cost=%.6f MB", standalone_cost, total_cost)
 
     result = {
         artifact_id: {
@@ -131,6 +188,12 @@ def get_artifact_cost(artifact_type: str, artifact_id: str):
     }
     if dependency:
         result[artifact_id]["standalone_cost"] = standalone_cost
+        logger.info("Dependency flag is true: including standalone_cost in response")
+
+    logger.info("GET /artifact/%s/%s/cost completed successfully: total_cost=%.6f MB%s",
+                artifact_type, artifact_id, total_cost,
+                ", standalone_cost=%.6f MB" % standalone_cost if dependency else "")
+    logger.debug("Response body: %s", result)
 
     return jsonify(result), 200
 
