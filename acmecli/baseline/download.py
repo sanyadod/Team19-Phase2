@@ -301,8 +301,14 @@ def get_artifact(artifact_type: str, artifact_id: str):
         },
     }
 
+    logger.info("Response structure: metadata keys=%s, data keys=%s", 
+                list(body["metadata"].keys()), list(body["data"].keys()))
+    logger.info("Response data: url=%s (length=%d), download_url present=%s (length=%d)",
+                source_url, len(source_url) if source_url else 0, 
+                "yes" if presigned_url else "no", len(presigned_url) if presigned_url else 0)
     logger.info("GET /artifacts/%s/%s completed successfully: artifact retrieved, filename=%s, source_url=%s, presigned_url_length=%d",
                 artifact_type, artifact_id, filename, source_url, len(presigned_url))
+    logger.debug("Full response body: %s", body)
     logger.debug("Response body metadata: name=%s, id=%s, type=%s, source_url=%s", filename, artifact_id, artifact_type, source_url)
 
     return jsonify(body), 200

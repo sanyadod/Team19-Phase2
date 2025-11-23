@@ -179,9 +179,12 @@ def get_artifact_cost(artifact_type: str, artifact_id: str):
 
     # compute the standalone cost and total cost (here: just size in MB)
     logger.info("Computing artifact cost (size in MB)")
-    standalone_cost = _get_artifact_size_mb(artifact_type, artifact_id)
-    total_cost = standalone_cost
-    logger.info("Cost calculation: standalone_cost=%.6f MB, total_cost=%.6f MB", standalone_cost, total_cost)
+    standalone_cost_raw = _get_artifact_size_mb(artifact_type, artifact_id)
+    # Ensure values are Python floats (not Decimal or other numeric types) to avoid type comparison issues
+    standalone_cost = float(standalone_cost_raw)
+    total_cost = float(standalone_cost)
+    logger.info("Cost calculation: standalone_cost=%.6f MB (type: %s), total_cost=%.6f MB (type: %s)", 
+                standalone_cost, type(standalone_cost).__name__, total_cost, type(total_cost).__name__)
 
     result = {
         artifact_id: {
@@ -191,11 +194,20 @@ def get_artifact_cost(artifact_type: str, artifact_id: str):
     if dependency:
         result[artifact_id]["standalone_cost"] = standalone_cost
         logger.info("Dependency flag is true: including standalone_cost in response")
+    else:
+        logger.info("Dependency flag is false: standalone_cost not included in response (per spec)")
 
+    logger.info("Response structure: artifact_id=%s, has_standalone_cost=%s, total_cost=%.6f",
+                artifact_id, dependency, total_cost)
+    logger.info("Response body keys: %s", list(result.keys()))
+    logger.info("Response body for artifact_id keys: %s", list(result[artifact_id].keys()))
     logger.info("GET /artifact/%s/%s/cost completed successfully: total_cost=%.6f MB%s",
                 artifact_type, artifact_id, total_cost,
                 ", standalone_cost=%.6f MB" % standalone_cost if dependency else "")
-    logger.debug("Response body: %s", result)
+    logger.debug("Full response body: %s", result)
+    logger.debug("Response body types: total_cost=%s%s",
+                 type(result[artifact_id]["total_cost"]).__name__,
+                 ", standalone_cost=%s" % type(result[artifact_id]["standalone_cost"]).__name__ if dependency else "")
 
     return jsonify(result), 200
 
