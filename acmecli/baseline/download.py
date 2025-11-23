@@ -20,7 +20,7 @@ MAX_RESULTS = 1000  # Maximum number of artifacts to return (to prevent 413)
 
 def _require_auth() -> str:
     """
-    Simple auth check (currently disabled in endpoints).
+    Simple auth check (currently unused).
     """
     token = request.headers.get("X-Authorization")
     if not token or not token.strip():
@@ -38,6 +38,7 @@ def _valid_type(artifact_type: str) -> bool:
 def _valid_id(artifact_id: str) -> bool:
     if not artifact_id:
         return False
+    # allow letters, digits, dash, dot, underscore
     return all(c.isalnum() or c in "-._" for c in artifact_id)
 
 
@@ -73,6 +74,7 @@ def _fetch_metadata(artifact_type: str, artifact_id: str) -> dict:
         )
         abort(404, description="Artifact does not exist.")
 
+    # Ensure the type in the table matches the requested type
     if item.get("artifact_type") != artifact_type:
         logger.error(
             "Artifact TYPE MISMATCH: expected=%s, found=%s, artifact_id=%s, item_keys=%s",
@@ -211,7 +213,13 @@ def list_artifacts():
             for item in all_items:
                 artifact_type = item.get("artifact_type", "")
                 artifact_name = item.get("filename", "")
-                artifact_id = item.get("id", "")
+                artifact_id_raw = item.get("id", "")
+
+                # Cast id to int for responses if possible
+                try:
+                    artifact_id = int(artifact_id_raw)
+                except (TypeError, ValueError):
+                    artifact_id = artifact_id_raw
 
                 # Filter by type if specified
                 if query_types and artifact_type not in query_types:
@@ -293,7 +301,7 @@ def list_artifacts():
 @app.get("/artifacts/<artifact_type>/<artifact_id>")
 def get_artifact(artifact_type: str, artifact_id: str):
     """
-    BASELINE: Return artifact metadata and a URL + download_url (not raw bytes).
+    BASELINE: Return artifact metadata and a URL (not raw bytes).
     """
 
     # If you later need auth, uncomment:
@@ -328,15 +336,18 @@ def get_artifact(artifact_type: str, artifact_id: str):
     source_url = meta.get("source_url", "")
 
     # Use ID and type from DynamoDB to ensure consistency
-    db_artifact_id = str(meta.get("id", artifact_id))
+    raw_id = meta.get("id", artifact_id)
+    try:
+        db_artifact_id = int(raw_id)
+    except (TypeError, ValueError):
+        db_artifact_id = raw_id
+
     db_artifact_type = str(meta.get("artifact_type", artifact_type))
 
-    # Always include url and download_url
-    presigned_url = _generate_presigned_url(bucket, key)
-
+    # For baseline spec, only `url` is required in data.
     data = {
         "url": source_url,
-        "download_url": presigned_url,
+        # If later phases need it, you can add "download_url" here using _generate_presigned_url(bucket, key).
     }
 
     body = {
@@ -361,16 +372,15 @@ def get_artifact(artifact_type: str, artifact_id: str):
         logger.error("Invalid metadata: %s", body["metadata"])
         abort(500, description="The artifact storage encountered an error.")
 
-    if "url" not in body["data"] or "download_url" not in body["data"]:
+    if "url" not in body["data"]:
         logger.error("Invalid data: %s", body["data"])
         abort(500, description="The artifact storage encountered an error.")
 
     logger.info(
-        "GET /artifacts/%s/%s: success, id=%s, download_url_len=%d",
+        "GET /artifacts/%s/%s: success, id=%s",
         artifact_type,
         artifact_id,
         db_artifact_id,
-        len(data["download_url"]),
     )
     return jsonify(body), 200
 
