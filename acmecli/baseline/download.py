@@ -19,9 +19,15 @@ MAX_RESULTS = 1000  # Maximum number of artifacts to return (to prevent 413)
 
 
 def _require_auth() -> str:
+    """
+    Simple auth check (currently disabled in endpoints).
+    """
     token = request.headers.get("X-Authorization")
     if not token or not token.strip():
-        abort(403, description="Authentication failed due to invalid or missing AuthenticationToken.")
+        abort(
+            403,
+            description="Authentication failed due to invalid or missing AuthenticationToken.",
+        )
     return token
 
 
@@ -40,7 +46,12 @@ def _fetch_metadata(artifact_type: str, artifact_id: str) -> dict:
     try:
         resp = META_TABLE.get_item(Key={"id": artifact_id})
     except ClientError as e:
-        logger.error("DynamoDB get_item FAILED for artifact_id=%s: %s", artifact_id, e, exc_info=True)
+        logger.error(
+            "DynamoDB get_item FAILED for artifact_id=%s: %s",
+            artifact_id,
+            e,
+            exc_info=True,
+        )
         logger.error(
             "DynamoDB error code: %s, error message: %s, table: %s",
             e.response.get("Error", {}).get("Code", "Unknown"),
@@ -57,7 +68,9 @@ def _fetch_metadata(artifact_type: str, artifact_id: str) -> dict:
             artifact_id,
             META_TABLE.table_name,
         )
-        logger.error("DynamoDB response: Item key was 'id'=%s, but no item returned", artifact_id)
+        logger.error(
+            "DynamoDB response: Item key was 'id'=%s, but no item returned", artifact_id
+        )
         abort(404, description="Artifact does not exist.")
 
     if item.get("artifact_type") != artifact_type:
@@ -82,24 +95,22 @@ def _generate_presigned_url(bucket: str, key: str) -> str:
             Params={"Bucket": bucket, "Key": key},
             ExpiresIn=3600,  # 1 hour
         )
-        if not url or not url.startswith("https://"):
+        if not url or not isinstance(url, str) or not url.startswith("https://"):
             logger.error(
                 "Presigned URL GENERATION FAILED: invalid URL format, bucket=%s, key=%s, url=%s",
                 bucket,
                 key,
                 url,
             )
-            logger.error(
-                "URL type: %s, URL length: %s, starts with https: %s",
-                type(url),
-                len(url) if url else 0,
-                url.startswith("https://") if url else False,
-            )
             abort(500, description="The artifact storage encountered an error.")
         return url
     except ClientError as e:
         logger.error(
-            "S3 presigned URL generation FAILED: bucket=%s, key=%s, error=%s", bucket, key, e, exc_info=True
+            "S3 presigned URL generation FAILED: bucket=%s, key=%s, error=%s",
+            bucket,
+            key,
+            e,
+            exc_info=True,
         )
         logger.error(
             "S3 error code: %s, error message: %s, error response: %s",
@@ -110,7 +121,11 @@ def _generate_presigned_url(bucket: str, key: str) -> str:
         abort(500, description="The artifact storage encountered an error.")
     except Exception as e:
         logger.error(
-            "Unexpected error generating presigned URL: bucket=%s, key=%s, error=%s", bucket, key, e, exc_info=True
+            "Unexpected error generating presigned URL: bucket=%s, key=%s, error=%s",
+            bucket,
+            key,
+            e,
+            exc_info=True,
         )
         abort(500, description="The artifact storage encountered an error.")
 
@@ -128,7 +143,9 @@ def list_artifacts():
             queries = request.get_json(silent=True)
     except Exception as e:
         logger.error("JSON PARSE FAILED: %s", e, exc_info=True)
-        logger.error("Request data: %s, content_type: %s", request.data, request.content_type)
+        logger.error(
+            "Request data: %s, content_type: %s", request.data, request.content_type
+        )
         abort(
             400,
             description="There is missing field(s) in the artifact_query or it is formed improperly, or is invalid.",
@@ -172,13 +189,19 @@ def list_artifacts():
 
         # Handle pagination token if present
         while "LastEvaluatedKey" in response:
-            response = META_TABLE.scan(ExclusiveStartKey=response["LastEvaluatedKey"])
+            response = META_TABLE.scan(
+                ExclusiveStartKey=response["LastEvaluatedKey"]
+            )
             all_items.extend(response.get("Items", []))
 
         # Process each query
         for idx, query in enumerate(queries):
             if not isinstance(query, dict) or "name" not in query:
-                logger.error("Invalid query #%d: not a dict or missing 'name' field: %s", idx + 1, query)
+                logger.error(
+                    "Invalid query #%d: not a dict or missing 'name' field: %s",
+                    idx + 1,
+                    query,
+                )
                 continue
 
             query_name = str(query.get("name", "")).strip()
@@ -225,7 +248,11 @@ def list_artifacts():
 
         # Check if too many results
         if len(results) > MAX_RESULTS:
-            logger.error("Too many results: %d exceeds MAX_RESULTS=%d", len(results), MAX_RESULTS)
+            logger.error(
+                "Too many results: %d exceeds MAX_RESULTS=%d",
+                len(results),
+                MAX_RESULTS,
+            )
             abort(413, description="Too many artifacts returned.")
 
         # Apply pagination
@@ -242,7 +269,11 @@ def list_artifacts():
         if next_offset:
             response_obj.headers.add("offset", next_offset)
 
-        logger.info("POST /artifacts: success, returning %d/%d artifacts", len(paginated_results), total)
+        logger.info(
+            "POST /artifacts: success, returning %d/%d artifacts",
+            len(paginated_results),
+            total,
+        )
         return response_obj, 200
 
     except ClientError as e:
@@ -262,25 +293,37 @@ def list_artifacts():
 @app.get("/artifacts/<artifact_type>/<artifact_id>")
 def get_artifact(artifact_type: str, artifact_id: str):
     """
-    BASELINE: Return artifact metadata and a URL (not raw bytes)
+    BASELINE: Return artifact metadata and a URL + download_url (not raw bytes).
     """
-    # 403 on missing/invalid auth (disabled for your assignment)
+
+    # If you later need auth, uncomment:
     # _require_auth()
 
     # 400 on bad type/id
     if not _valid_type(artifact_type):
-        logger.error("Invalid artifact_type: %s (valid types: %s)", artifact_type, VALID_TYPES)
-        abort(400, description="There is missing field(s) in the artifact_type or artifact_id ")
+        logger.error(
+            "Invalid artifact_type: %s (valid types: %s)", artifact_type, VALID_TYPES
+        )
+        abort(
+            400,
+            description="There is missing field(s) in the artifact_type or artifact_id ",
+        )
 
     if not _valid_id(artifact_id):
-        logger.error("Invalid artifact_id: %s (must be alphanumeric with -._ allowed)", artifact_id)
-        abort(400, description="There is missing field(s) in the artifact_type or artifact_id ")
+        logger.error(
+            "Invalid artifact_id: %s (must be alphanumeric with -._ allowed)",
+            artifact_id,
+        )
+        abort(
+            400,
+            description="There is missing field(s) in the artifact_type or artifact_id ",
+        )
 
-    # 404 if artifact not found / wrong type
+    # 404 if artifact not found
     meta = _fetch_metadata(artifact_type, artifact_id)
 
     bucket = meta.get("s3_bucket", S3_BUCKET_DEFAULT)
-    key = meta["s3_key"]  # e.g. "model/1763932277585.zip"
+    key = meta["s3_key"]  # e.g. "model/12345.zip"
     filename = meta.get("filename", artifact_id)
     source_url = meta.get("source_url", "")
 
@@ -288,65 +331,26 @@ def get_artifact(artifact_type: str, artifact_id: str):
     db_artifact_id = str(meta.get("id", artifact_id))
     db_artifact_type = str(meta.get("artifact_type", artifact_type))
 
-    # ---------- NEW: support both ?include=download_url and ?download_url=true ----------
-    include_param = request.args.get("include", "")
-    include_fields = {part.strip() for part in include_param.split(",") if part.strip()}
-    include_download_url = "download_url" in include_fields
+    # Always include url and download_url
+    presigned_url = _generate_presigned_url(bucket, key)
 
-    # Autograder style: ?download_url=true
-    if request.args.get("download_url", "").lower() == "true":
-        include_download_url = True
-    # ---------------------------------------------------------------------------
-
-    # Build data object - always include url
     data = {
-        "url": source_url,  # Original source URL used during ingest
+        "url": source_url,
+        "download_url": presigned_url,
     }
-
-    # Only generate and include download_url if requested
-    if include_download_url:
-        try:
-            presigned_url = _generate_presigned_url(bucket, key)
-
-            # Validate presigned URL
-            if not presigned_url or not isinstance(presigned_url, str):
-                logger.error(
-                    "Invalid presigned URL: type=%s, value=%s, bucket=%s, key=%s",
-                    type(presigned_url),
-                    presigned_url,
-                    bucket,
-                    key,
-                )
-                abort(500, description="The artifact storage encountered an error.")
-
-            if not presigned_url.startswith("https://"):
-                logger.error(
-                    "Presigned URL does not start with https://: url=%s, bucket=%s, key=%s",
-                    presigned_url,
-                    bucket,
-                    key,
-                )
-                abort(500, description="The artifact storage encountered an error.")
-
-            data["download_url"] = presigned_url
-        except Exception as e:
-            logger.error(
-                "Failed to generate presigned URL: bucket=%s, key=%s, error=%s", bucket, key, e, exc_info=True
-            )
-            abort(500, description="The artifact storage encountered an error.")
 
     body = {
         "metadata": {
             "name": filename,
-            "id": db_artifact_id,      # Use ID from DynamoDB
-            "type": db_artifact_type,  # Use type from DynamoDB
+            "id": db_artifact_id,
+            "type": db_artifact_type,
         },
         "data": data,
     }
 
-    # Validate response structure
+    # Basic validation of response structure
     if "metadata" not in body or "data" not in body:
-        logger.error("Invalid response structure: missing metadata or data, body=%s", body)
+        logger.error("Invalid response structure: %s", body)
         abort(500, description="The artifact storage encountered an error.")
 
     if (
@@ -354,54 +358,23 @@ def get_artifact(artifact_type: str, artifact_id: str):
         or "id" not in body["metadata"]
         or "type" not in body["metadata"]
     ):
-        logger.error("Invalid metadata structure: missing required fields, metadata=%s", body["metadata"])
+        logger.error("Invalid metadata: %s", body["metadata"])
         abort(500, description="The artifact storage encountered an error.")
 
-    if "url" not in body["data"]:
-        logger.error("Invalid data structure: missing url, data=%s", body["data"])
-        logger.error("Full body: %s", body)
+    if "url" not in body["data"] or "download_url" not in body["data"]:
+        logger.error("Invalid data: %s", body["data"])
         abort(500, description="The artifact storage encountered an error.")
 
-    # Validate download_url only if it was included
-    if include_download_url:
-        if "download_url" not in body["data"]:
-            logger.error("download_url requested but missing from response: data=%s", body["data"])
-            logger.error("Full body: %s", body)
-            abort(500, description="The artifact storage encountered an error.")
-
-        if (
-            not body["data"]["download_url"]
-            or not body["data"]["download_url"].startswith("https://")
-        ):
-            logger.error(
-                "Invalid download_url: url=%s, type=%s, starts_with_https=%s",
-                body["data"]["download_url"],
-                type(body["data"]["download_url"]),
-                body["data"]["download_url"].startswith("https://")
-                if body["data"]["download_url"]
-                else False,
-            )
-            logger.error("Full response body: %s", body)
-            abort(500, description="The artifact storage encountered an error.")
-
-    if include_download_url:
-        logger.info(
-            "GET /artifacts/%s/%s: success, id=%s, download_url_len=%d",
-            artifact_type,
-            artifact_id,
-            db_artifact_id,
-            len(data["download_url"]),
-        )
-    else:
-        logger.info(
-            "GET /artifacts/%s/%s: success, id=%s, download_url not requested",
-            artifact_type,
-            artifact_id,
-            db_artifact_id,
-        )
-
+    logger.info(
+        "GET /artifacts/%s/%s: success, id=%s, download_url_len=%d",
+        artifact_type,
+        artifact_id,
+        db_artifact_id,
+        len(data["download_url"]),
+    )
     return jsonify(body), 200
 
 
 if __name__ == "__main__":
+    # Run Flask dev server
     app.run(host="0.0.0.0", port=5001, debug=True)
