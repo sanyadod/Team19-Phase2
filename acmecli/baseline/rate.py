@@ -1,5 +1,3 @@
-# acmecli/baseline/rate.py
-
 from flask import Flask, request, jsonify, abort
 from botocore.exceptions import ClientError
 

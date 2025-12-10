@@ -1,5 +1,3 @@
-# acmecli/baseline/modeldb.py
-
 import logging
 from typing import Dict, List, Any
 
