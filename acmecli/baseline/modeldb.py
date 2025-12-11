@@ -1,5 +1,6 @@
 import logging
 from typing import Dict, List, Any
+from decimal import Decimal
 
 import boto3
 from botocore.exceptions import ClientError
@@ -40,7 +41,6 @@ def get_model_item(model_id: str) -> Dict[str, Any]:
     if not item or item.get("artifact_type") != "model":
         return None
     return item
-
 
 def scan_models() -> List[Dict[str, Any]]:
     """
@@ -124,26 +124,29 @@ def put_model_from_phase1(obj: Dict[str, Any]) -> None:
     if "net_score" not in obj:
         obj["net_score"] = compute_netscore(obj)
 
+    def to_dec(x) -> Decimal:
+        return Decimal(str(x))
+
     item: Dict[str, Any] = {
         "id": model_id,
         "artifact_type": "model",
         "version": version,
         "name": model_id,
 
-        # Phase 1 scores
-        "size_score": float(obj["size_score"]),
-        "license_score": float(obj["license_score"]),
-        "rampup_score": float(obj["rampup_score"]),
-        "bus_factor": float(obj["bus_factor"]),
-        "dataset_and_code": float(obj["dataset_and_code"]),
-        "dataset_quality": float(obj["dataset_quality"]),
-        "code_quality": float(obj["code_quality"]),
-        "perf_claims": float(obj["perf_claims"]),
-        "net_score": float(obj["net_score"]),
+        # Phase 1 scores (as Decimal)
+        "size_score": to_dec(obj["size_score"]),
+        "license_score": to_dec(obj["license_score"]),
+        "rampup_score": to_dec(obj["rampup_score"]),
+        "bus_factor": to_dec(obj["bus_factor"]),
+        "dataset_and_code": to_dec(obj["dataset_and_code"]),
+        "dataset_quality": to_dec(obj["dataset_quality"]),
+        "code_quality": to_dec(obj["code_quality"]),
+        "perf_claims": to_dec(obj["perf_claims"]),
+        "net_score": to_dec(obj["net_score"]),
 
-        # Phase 2 extras
-        "reproducibility": float(obj.get("reproducibility", 0.0)),
-        "reviewedness": float(obj.get("reviewedness", -1.0)),
+        # Phase 2 extras (as Decimal)
+        "reproducibility": to_dec(obj.get("reproducibility", 0.0)),
+        "reviewedness": to_dec(obj.get("reviewedness", -1.0)),
         "parents": obj.get("parents", []),
     }
 
