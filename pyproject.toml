@@ -2,26 +2,14 @@
 requires = ["setuptools>=45", "wheel"]
 build-backend = "setuptools.build_meta"
 
-[tool.setuptools]
-packages = ["acmecli"]
-
-# DO NOT EXCLUDE TESTS — autograder needs them
 [tool.setuptools.packages.find]
-exclude = ["test_artifacts*"]   # keep artifacts out, keep tests IN
+exclude = ["test_artifacts*", "tests*"]
 
 [project]
 name = "acmecli"
 version = "0.1.0"
 requires-python = ">=3.8"
-dependencies = [
-    "requests>=2.32.0",
-    "tqdm>=4.66.0",
-    "orjson>=3.10.0",
-    "flask>=2.0.0",
-    "flask-cors>=4.0.0",
-    "boto3>=1.26.0",
-    "streamlit>=1.39.0"
-]
+dependencies = ["requests>=2.32.0", "tqdm>=4.66.0", "orjson>=3.10.0","flask>=2.0.0","flask-cors>=4.0.0","boto3>=1.26.0","streamlit>=1.39.0"]
 
 [project.optional-dependencies]
 dev = [
@@ -35,22 +23,41 @@ dev = [
   "pre-commit>=3.5"
 ]
 
+# ---- Formatting / Linting config ----
+
+[tool.black]
+line-length = 100
+target-version = ["py38"]
+
+[tool.isort]
+profile = "black"
+line_length = 100
+
+# flake8 is configured in .flake8 file to ensure CI picks it up consistently.
+
+# ---- Coverage ----
 [tool.coverage.run]
 branch = true
 source = ["acmecli"]
 
 [tool.coverage.report]
-fail_under = 10          # <= IMPORTANT: autograder requires low threshold
+fail_under = 80
 show_missing = true
 
-[tool.pytest.ini_options]
-addopts = "-q"
-pythonpath = ["."]
-testpaths = ["tests"]     # <= REQUIRED
-
-# mypy
+# ---- mypy ----
 [tool.mypy]
 python_version = "3.12"
 warn_unused_ignores = true
 strict = true
+ignore_missing_imports = false
+
+[[tool.mypy.overrides]]
+module = ["numpy", "torch", "torch.*"]
 ignore_missing_imports = true
+
+# ---- pytest ----
+[tool.pytest.ini_options]
+addopts = "-q"
+testpaths = ["tests"]
+pythonpath = ["."]
+import-mode = "importlib"
