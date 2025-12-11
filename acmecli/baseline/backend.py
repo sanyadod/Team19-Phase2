@@ -53,7 +53,7 @@ for rule in upload_module.app.url_map.iter_rules():
             methods=rule.methods
         )
 
-# Register all routes from reset.py
+#Register all routes from reset.py
 for rule in reset_module.app.url_map.iter_rules():
     # Skip the static route
     if rule.endpoint != 'static':
@@ -61,8 +61,8 @@ for rule in reset_module.app.url_map.iter_rules():
             rule.rule,
             endpoint=f"reset_{rule.endpoint}",  # Prefix to avoid conflicts
             view_func=reset_module.app.view_functions[rule.endpoint],
-            methods=rule.methods
-        )
+           methods=rule.methods
+       )
 
 # Register all routes from cost.py
 for rule in cost_module.app.url_map.iter_rules():
@@ -85,6 +85,31 @@ for rule in tracks_module.app.url_map.iter_rules():
             view_func=tracks_module.app.view_functions[rule.endpoint],
             methods=rule.methods
         )
+
+import acmecli.baseline.endpoints_list as list_module
+import acmecli.baseline.endpoints_search as search_module
+import acmecli.baseline.endpoints_ingest as ingest_module
+
+#registering all routes from modules
+for rule in list_module.app.url_map.iter_rules():
+    if rule.endpoint != 'static':
+        app.add_url_rule(rule.rule, endpoint=f"list_{rule.endpoint}",
+                         view_func=list_module.app.view_functions[rule.endpoint],
+                         methods=rule.methods)
+
+for rule in search_module.app.url_map.iter_rules():
+    if rule.endpoint != 'static':
+        app.add_url_rule(rule.rule, endpoint=f"search_{rule.endpoint}",
+                         view_func=search_module.app.view_functions[rule.endpoint],
+                         methods=rule.methods)
+
+for rule in ingest_module.app.url_map.iter_rules():
+    if rule.endpoint != 'static':
+        app.add_url_rule(rule.rule, endpoint=f"ingest_{rule.endpoint}",
+                         view_func=ingest_module.app.view_functions[rule.endpoint],
+                         methods=rule.methods)
+
+
 
 if __name__ == "__main__":
     # Run the combined backend on port 5001
