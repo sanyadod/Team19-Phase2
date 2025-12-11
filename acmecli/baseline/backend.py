@@ -19,6 +19,7 @@ logging.basicConfig(
 
 # Create a new Flask app
 app = Flask(__name__)
+
 # Enable CORS for all routes with permissive settings for development
 CORS(app, resources={r"/*": {"origins": "*", "methods": ["GET", "POST", "PUT", "DELETE", "OPTIONS"], "allow_headers": ["Content-Type", "X-Authorization"]}})
 
@@ -83,6 +84,17 @@ for rule in tracks_module.app.url_map.iter_rules():
             rule.rule,
             endpoint=f"tracks_{rule.endpoint}",  # Prefix to avoid conflicts
             view_func=tracks_module.app.view_functions[rule.endpoint],
+            methods=rule.methods
+        )
+
+# Register /rate routes
+for rule in rate_module.app.url_map.iter_rules():
+    # Skip the static route
+    if rule.endpoint != 'static':
+        app.add_url_rule(
+            rule.rule,
+            endpoint=f"rate_{rule.endpoint}",  # Prefix to avoid conflicts
+            view_func=rate_module.app.view_functions[rule.endpoint],
             methods=rule.methods
         )
 
