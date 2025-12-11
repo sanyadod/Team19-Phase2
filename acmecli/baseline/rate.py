@@ -1,5 +1,6 @@
 from flask import Flask, request, jsonify, abort
-from botocore.exceptions import ClientError
+from botocore.exceptions import ClientError, NoCredentialsError
+from flask_cors import CORS
 
 from acmecli.baseline.modeldb import (
     get_model_item,
@@ -8,11 +9,14 @@ from acmecli.baseline.modeldb import (
 )
 
 app = Flask(__name__)
-
+CORS(app)
 
 # ---------- Helpers ----------
 
 def _require_auth() -> str:
+    if request.method == "OPTIONS":
+        return ""
+    
     token = request.headers.get("X-Authorization")
     if not token or not token.strip():
         abort(403, description="Authentication failed due to invalid or missing AuthenticationToken.")
@@ -22,7 +26,7 @@ def _require_auth() -> str:
 def _load_model_or_404(model_id: str):
     try:
         item = get_model_item(model_id)
-    except ClientError:
+    except (ClientError, NoCredentialsError):
         abort(500, description="The model registry encountered a database error.")
     if not item:
         abort(404, description="Model does not exist.")
@@ -101,3 +105,22 @@ def rate_v1(model_id: str):
     }
 
     return jsonify(body), 200
+
+@app.route("/artifact/model/<model_id>/rate", methods=["GET", "OPTIONS"])
+def model_artifact_rate(model_id: str):
+    """
+    Implements GET /artifact/model/{id}/rate from the OpenAPI spec.
+
+    - OPTIONS: CORS preflight, no auth, no DB.
+    - GET:     Delegate to the v1 rating logic.
+    """
+    if request.method == "OPTIONS":
+        # Preflight should succeed with no auth/DB work
+        return ("", 204)
+
+    # Actual GET
+    return rate_v1(model_id)
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=5001, debug=True)
+

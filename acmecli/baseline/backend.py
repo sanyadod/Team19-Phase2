@@ -9,7 +9,6 @@ import acmecli.baseline.reset as reset_module
 import acmecli.baseline.cost as cost_module
 import acmecli.baseline.rate as rate_module
 import acmecli.baseline.search as search_module
-
 import acmecli.baseline.tracks as tracks_module
 
 # Configure logging
