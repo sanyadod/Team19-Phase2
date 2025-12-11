@@ -7,9 +7,6 @@ import acmecli.baseline.download as download_module
 import acmecli.baseline.upload as upload_module
 import acmecli.baseline.reset as reset_module
 import acmecli.baseline.cost as cost_module
-import acmecli.baseline.rate as rate_module
-import acmecli.baseline.search as search_module
-
 import acmecli.baseline.tracks as tracks_module
 
 # Configure logging
@@ -76,24 +73,6 @@ for rule in cost_module.app.url_map.iter_rules():
             methods=rule.methods
         )
 
-# Register /rate routes
-for rule in rate_module.app.url_map.iter_rules():
-    if rule.endpoint != 'static':
-        app.add_url_rule(
-            rule.rule,
-            endpoint=f"rate_{rule.endpoint}",
-            view_func=rate_module.app.view_functions[rule.endpoint],
-            methods=rule.methods
-        )
-
-# Register /search routes
-for rule in search_module.app.url_map.iter_rules():
-    if rule.endpoint != 'static':
-        app.add_url_rule(
-            rule.rule,
-            endpoint=f"search_{rule.endpoint}",
-            view_func=search_module.app.view_functions[rule.endpoint],
-        )
 # Register all routes from tracks.py
 for rule in tracks_module.app.url_map.iter_rules():
     # Skip the static route
