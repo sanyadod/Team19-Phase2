@@ -154,6 +154,23 @@ def _score_from_context(name: str, context: dict) -> dict:
     rev_latency = 1.0
     tree_latency = 1.0
 
+    def ms_to_s(x: float) -> float:
+        return float(x) / 1000.0
+    
+    size_latency_s = ms_to_s(size_latency)
+    license_latency_s = ms_to_s(license_latency)
+    ramp_latency_s = ms_to_s(ramp_latency)
+    bus_latency_s = ms_to_s(bus_latency)
+    dac_latency_s = ms_to_s(dac_latency)
+    dqual_latency_s = ms_to_s(dqual_latency)
+    cqual_latency_s = ms_to_s(cqual_latency)
+    perf_latency_s = ms_to_s(perf_latency)
+
+    net_score_latency_s = ms_to_s(net_score_latency)
+
+    # and return *_latency fields using the *_s values
+
+
     return {
         "name": name,
         "category": "huggingface-model",
@@ -186,11 +203,13 @@ def _score_from_context(name: str, context: dict) -> dict:
 def _require_auth() -> str:
     if request.method == "OPTIONS":
         return ""
-    
-    token = request.headers.get("X-Authorization")
-    # if not token or not token.strip():
-    #     abort(403, description="Authentication failed due to invalid or missing AuthenticationToken.")
+
+    # accept either header
+    token = request.headers.get("X-Authorization") or request.headers.get("Authorization") or ""
+    if not token.strip():
+        abort(403, description="Authentication failed due to invalid or missing AuthenticationToken.")
     return token
+
 
 
 def _load_model_or_404(model_id: str):
@@ -272,7 +291,7 @@ def rate_v1(model_id: str):
 
 
 @app.route("/artifact/model/<model_id>/rate", methods=["GET", "OPTIONS"])
-def model_artifact_rate(model_id: str):
+def model_artifact_rate(id: str):
     """
     Implements GET /artifact/model/{id}/rate from the OpenAPI spec.
 
@@ -284,7 +303,9 @@ def model_artifact_rate(model_id: str):
         return ("", 200)
 
     # Actual GET
-    return rate_v1(model_id)
+    return rate_v1(id)
+
+
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5001, debug=True)
