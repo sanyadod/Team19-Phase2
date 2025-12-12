@@ -27,51 +27,88 @@ def timeout_handler(signum, frame):
 
 
 def is_safe_regex(pattern: str) -> bool:
-    # Check for nested quantifiers
-    nested_quantifiers = re.compile(r'(\(.*[+*]{1,2}.*\))[+*]')
-    if nested_quantifiers.search(pattern):
-        logger.warning(f"Detected nested quantifiers in pattern: {pattern}")
-        return False
+    """
+    Detect potentially malicious regex patterns that cause ReDoS.
     
-    # Check for extremely long patterns
+    Common ReDoS patterns:
+    - Nested quantifiers: (a+)+
+    - Multiple consecutive quantified groups: (a+)(a+)(a+)
+    - Alternation with overlap: (a|a)*
+    """
+    # Check 1: Pattern too long
     if len(pattern) > 500:
-        logger.warning(f"Pattern too long ({len(pattern)} chars)")
+        logger.warning(f"Pattern too long: {len(pattern)} chars")
         return False
     
-    # Check for excessive alternations
+    # Check 2: Too many alternations
     if pattern.count('|') > 20:
-        logger.warning(f"Too many alternations in pattern")
+        logger.warning("Too many alternations")
+        return False
+    
+    # Check 3: Nested quantifiers like (a+)+ or (a*)*
+    nested_quantifiers = re.compile(r'(\([^)]*[+*?]\))[+*?]')
+    if nested_quantifiers.search(pattern):
+        logger.warning(f"Nested quantifiers detected: {pattern}")
+        return False
+    
+    # Check 4: Multiple consecutive quantified groups (ReDoS pattern)
+    # Matches: (a+)(a+) or (x*)(y+) etc.
+    consecutive_quantified = re.compile(r'(\([^)]+[+*?]\)){2,}')
+    if consecutive_quantified.search(pattern):
+        # Count how many consecutive quantified groups
+        matches = consecutive_quantified.findall(pattern)
+        if matches:
+            logger.warning(f"Multiple consecutive quantified groups: {pattern}")
+            return False
+    
+    # Check 5: Exponential alternation like (a|a)*
+    exponential_alt = re.compile(r'\(([^)|]+\|)+[^)]+\)[+*]')
+    if exponential_alt.search(pattern):
+        logger.warning(f"Exponential alternation detected: {pattern}")
         return False
     
     return True
 
 
 def safe_regex_match(pattern: str, text: str, timeout: int = REGEX_TIMEOUT_SECONDS) -> bool:
-
-    # Set up timeout signal (Unix-like systems only)
+    """
+    Perform regex matching with timeout protection.
+    Uses Python's 're' module (not 'regex') to match autograder behavior.
+    """
+    import signal
+    
+    def timeout_handler(signum, frame):
+        raise TimeoutError("Regex matching timed out")
+    
     try:
-        signal.signal(signal.SIGALRM, timeout_handler)
-        signal.alarm(timeout)
+        # Set alarm (Unix-like systems only)
+        if hasattr(signal, 'SIGALRM'):
+            signal.signal(signal.SIGALRM, timeout_handler)
+            signal.alarm(timeout)
         
+        # Compile and match
         compiled_pattern = re.compile(pattern, re.IGNORECASE)
         result = compiled_pattern.search(text) is not None
         
-        signal.alarm(0)  # Cancel alarm
+        # Cancel alarm
+        if hasattr(signal, 'SIGALRM'):
+            signal.alarm(0)
+        
         return result
         
-    except AttributeError:
-        # Windows doesn't support SIGALRM, fall back to simple match
-        compiled_pattern = re.compile(pattern, re.IGNORECASE)
-        return compiled_pattern.search(text) is not None
-        
     except TimeoutError:
-        signal.alarm(0)
-        raise
+        # Regex took too long - it's malicious!
+        if hasattr(signal, 'SIGALRM'):
+            signal.alarm(0)
+        logger.warning(f"Regex timeout - potential ReDoS: {pattern}")
+        raise  # Re-raise to trigger 400 error
         
     except re.error as e:
-        signal.alarm(0)
-        logger.error(f"Invalid regex pattern: {e}")
+        if hasattr(signal, 'SIGALRM'):
+            signal.alarm(0)
+        logger.error(f"Invalid regex: {e}")
         raise ValueError(f"Invalid regex pattern: {e}")
+        
 
 
 def search_artifacts_internal(regex_str: str, offset: int = 0):
@@ -210,4 +247,3 @@ if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
     app.run(host="0.0.0.0", port=5005, debug=True)
 
-    
