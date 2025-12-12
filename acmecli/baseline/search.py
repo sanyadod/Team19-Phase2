@@ -9,8 +9,10 @@ app = Flask(__name__)
 # ---------- Auth helper ----------
 
 def _require_auth() -> str:
-    token = request.headers.get("X-Authorization")
-    if not token or not token.strip():
+    if request.method == "OPTIONS":
+        return ""
+    token = request.headers.get("X-Authorization") or request.headers.get("Authorization") or ""
+    if not token.strip():
         abort(403, description="Authentication failed due to invalid or missing AuthenticationToken.")
     return token
 
