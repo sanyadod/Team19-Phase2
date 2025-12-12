@@ -23,18 +23,7 @@ except ImportError as e:
 
 
 def score_model(url: str) -> dict:
-    """
-    Score a HuggingFace model using Phase 1 metrics.
-    
-    Args:
-        url: HuggingFace model URL
-        
-    Returns:
-        Dictionary with scores
-        
-    Raises:
-        Exception: If scoring fails
-    """
+
     if not SCORING_AVAILABLE:
         # Mock scores for testing (all pass threshold)
         logger.warning("Using mock scores - Phase 1 scoring not available")
@@ -70,15 +59,7 @@ def score_model(url: str) -> dict:
 
 
 def check_ingestibility(scores: dict) -> tuple:
-    """
-    Check if model meets ingest criteria (all non-latency metrics >= 0.5).
-    
-    Args:
-        scores: Dictionary of metric scores
-        
-    Returns:
-        (is_ingestible: bool, reason: str)
-    """
+
     # Metrics that must be >= 0.5 (exclude latency and size_score)
     required_metrics = [
         "license",
@@ -169,10 +150,7 @@ def ingest_artifact():
         # Step 3: Use upload module to create the artifact
         logger.info("Step 3: Uploading artifact using upload module...")
         
-        # The upload module's create_artifact expects:
-        # - artifact_type as URL parameter
-        # - JSON payload with "url" field
-        # We need to call it in a way that simulates the request
+
         
         # Create a mock request context for upload module
         with app.test_request_context(
@@ -208,3 +186,4 @@ def ingest_artifact():
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
     app.run(host="0.0.0.0", port=5006, debug=True)
+    

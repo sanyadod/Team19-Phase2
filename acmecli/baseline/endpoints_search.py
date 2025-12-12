@@ -189,32 +189,7 @@ def search_by_regex_post():
 
 @app.route("/artifacts/search", methods=["GET"])
 def search_artifacts_get():
-    """
-    GET /artifacts/search?q=<regex>
-    
-    Search for artifacts using regex over names and metadata.
-    
-    Query Parameters:
-    - q or regex (required): Regex pattern to search for
-    - offset (optional): Pagination offset (default: 0)
-    
-    Response:
-    - 200: List of matching artifacts
-    - 400: Invalid or malicious regex
-    - 500: Server error
-    
-    Example:
-    GET /artifacts/search?q=bert.*uncased
-    
-    Returns:
-    [
-        {
-            "id": 123,
-            "name": "bert-base-uncased",
-            "type": "model"
-        }
-    ]
-    """
+
     # Accept either 'q' or 'regex' parameter
     regex_str = request.args.get("regex") or request.args.get("q")
     
@@ -234,3 +209,5 @@ def search_artifacts_get():
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
     app.run(host="0.0.0.0", port=5005, debug=True)
+
+    

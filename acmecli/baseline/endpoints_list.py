@@ -57,7 +57,7 @@ def list_all_artifacts():
         
         # Apply pagination
         total = len(results)
-        end_idx = min(offset + PAGE_SIZE, total) 
+        end_idx = min(offset + PAGE_SIZE, total)  # ✅ FIXED: comma instead of plus
         paginated = results[offset:end_idx]
         
         # Calculate next offset
@@ -88,3 +88,5 @@ def list_all_artifacts():
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
     app.run(host="0.0.0.0", port=5004, debug=True)
+
+    
