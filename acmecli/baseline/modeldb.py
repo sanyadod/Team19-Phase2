@@ -64,6 +64,9 @@ def scan_models() -> List[Dict[str, Any]]:
 
     return items
 
+def ms_to_s(x: float) -> float:
+    # always >= 0 and in seconds
+    return float(x) / 1000.0
 
 def compute_netscore(item: Dict[str, Any]) -> float:
     """
