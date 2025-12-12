@@ -14,6 +14,8 @@ META_TABLE = DYNAMODB.Table("artifact")
 @app.route("/artifacts/<artifact_type>/<artifact_id>", methods=["DELETE"])
 def delete_artifact(artifact_type, artifact_id):
 
+
+
     try:
         resp = META_TABLE.get_item(
             Key={"id": artifact_id}
