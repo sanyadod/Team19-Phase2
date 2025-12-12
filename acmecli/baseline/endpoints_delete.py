@@ -1,8 +1,11 @@
-from flask import request, jsonify, abort
+from flask import Flask, request, jsonify, abort
 import boto3
 from botocore.exceptions import ClientError
 import logging
+import re
+import signal
 
+app = Flask(__name__)
 logger = logging.getLogger(__name__)
 
 AWS_REGION = "us-east-1"
