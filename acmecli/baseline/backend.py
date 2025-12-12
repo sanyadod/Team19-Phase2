@@ -5,6 +5,7 @@ from flask import Flask
 from flask_cors import CORS
 import acmecli.baseline.download as download_module
 import acmecli.baseline.upload as upload_module
+import acmecli.baseline.endpoints_delete as delete_module
 import acmecli.baseline.reset as reset_module
 import acmecli.baseline.cost as cost_module
 import acmecli.baseline.rate as rate_module
@@ -12,6 +13,7 @@ import acmecli.baseline.endpoints_search as search_module
 import acmecli.baseline.tracks as tracks_module
 import acmecli.baseline.endpoints_list as list_module
 import acmecli.baseline.endpoints_ingest as ingest_module
+
 
 # Configure logging
 logging.basicConfig(
@@ -133,6 +135,17 @@ for rule in ingest_module.app.url_map.iter_rules():
             view_func=ingest_module.app.view_functions[rule.endpoint],
             methods=rule.methods
         )
+        
+# Register all routes from endpoints_delete.py
+for rule in delete_module.app.url_map.iter_rules():
+    if rule.endpoint != 'static':
+        app.add_url_rule(
+            rule.rule,
+            endpoint=f"delete_{rule.endpoint}",  # Prefix avoids conflicts
+            view_func=delete_module.app.view_functions[rule.endpoint],
+            methods=rule.methods
+        )
+
 
 
 if __name__ == "__main__":

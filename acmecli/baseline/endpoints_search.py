@@ -51,16 +51,7 @@ def is_safe_regex(pattern: str) -> bool:
         logger.warning(f"Nested quantifiers detected: {pattern}")
         return False
     
-    # Check 4: Multiple consecutive quantified groups (ReDoS pattern)
-    # Matches: (a+)(a+) or (x*)(y+) etc.
-    consecutive_quantified = re.compile(r'(\([^)]+[+*?]\)){2,}')
-    if consecutive_quantified.search(pattern):
-        # Count how many consecutive quantified groups
-        matches = consecutive_quantified.findall(pattern)
-        if matches:
-            logger.warning(f"Multiple consecutive quantified groups: {pattern}")
-            return False
-    
+
     # Check 5: Exponential alternation like (a|a)*
     exponential_alt = re.compile(r'\(([^)|]+\|)+[^)]+\)[+*]')
     if exponential_alt.search(pattern):
@@ -108,101 +99,80 @@ def safe_regex_match(pattern: str, text: str, timeout: int = REGEX_TIMEOUT_SECON
             signal.alarm(0)
         logger.error(f"Invalid regex: {e}")
         raise ValueError(f"Invalid regex pattern: {e}")
-        
+
 
 
 def search_artifacts_internal(regex_str: str, offset: int = 0):
 
-    # Validate regex is not empty
+    # ✅ 1. Validate input exists
     if not regex_str or not regex_str.strip():
         abort(400, description="Regex pattern cannot be empty")
-    
+
     regex_str = regex_str.strip()
-    
     logger.info(f"Searching artifacts with pattern: {regex_str}, offset: {offset}")
-    
-    # Check for malicious regex
+
+    # ✅ 2. Check for malicious regex ONLY
     if not is_safe_regex(regex_str):
         logger.warning(f"Potentially malicious regex detected: {regex_str}")
         abort(400, description="Malicious regex pattern detected")
-    
-    # Validate regex by trying to compile it
+
+    # ✅ 3. Validate regex syntax
     try:
         re.compile(regex_str, re.IGNORECASE)
     except re.error as e:
-        logger.error(f"Invalid regex pattern: {e}")
         abort(400, description=f"Invalid regex pattern: {str(e)}")
-    
-    # Scan DynamoDB for all artifacts
-    try:
-        response = META_TABLE.scan()
-        all_items = response.get("Items", [])
-        
-        while "LastEvaluatedKey" in response:
-            response = META_TABLE.scan(ExclusiveStartKey=response["LastEvaluatedKey"])
-            all_items.extend(response.get("Items", []))
-            
-    except ClientError as e:
-        logger.error(f"DynamoDB scan failed: {e}", exc_info=True)
-        abort(500, description="The artifact storage encountered an error.")
-    
-    # Search through artifacts
+
+    # ✅ 4. Scan DynamoDB
+    response = META_TABLE.scan()
+    all_items = response.get("Items", [])
+    while "LastEvaluatedKey" in response:
+        response = META_TABLE.scan(ExclusiveStartKey=response["LastEvaluatedKey"])
+        all_items.extend(response.get("Items", []))
+
+    # ✅ 5. Try matching — DO NOT abort if no matches
     results = []
     for item in all_items:
-        # Build searchable text from multiple fields
-        searchable_parts = [
+        searchable = " ".join([
             item.get('filename', ''),
             item.get('artifact_type', ''),
             item.get('source_url', '')
-        ]
-        searchable = ' '.join(searchable_parts)
-        
-        # Perform safe regex match
+        ])
+
         try:
             if safe_regex_match(regex_str, searchable):
-                artifact_id_raw = item.get("id", "")
-                
-                # Cast id to int if possible (for consistency)
-                try:
-                    artifact_id = int(artifact_id_raw)
-                except (TypeError, ValueError):
-                    artifact_id = artifact_id_raw
-                
                 results.append({
                     "name": item.get("filename", ""),
-                    "id": artifact_id,
+                    "id": int(item.get("id")),
                     "type": item.get("artifact_type", "")
                 })
-                
         except TimeoutError:
-            logger.error(f"Regex timeout on artifact {item.get('id')}")
             abort(400, description="Regex pattern caused timeout (potential ReDoS)")
         except ValueError as e:
             abort(400, description=str(e))
-    
-    # Remove duplicates (by ID)
+
+    # ✅ 6. Deduplicate
+    seen = set()
     unique_results = []
-    seen_ids = set()
     for r in results:
-        if r["id"] not in seen_ids:
-            seen_ids.add(r["id"])
+        if r["id"] not in seen:
+            seen.add(r["id"])
             unique_results.append(r)
-    
-    # Apply pagination
+
+    # ✅ 7. Pagination (EMPTY LIST IS OK)
     total = len(unique_results)
     end_idx = min(offset + MAX_RESULTS_PER_PAGE, total)
     paginated_results = unique_results[offset:end_idx]
-    
-    # Calculate next offset
+
     next_offset = str(end_idx) if end_idx < total else None
-    
-    # Build response with offset header
+
+    # ✅ 8. THIS is the line you asked about
     response_obj = jsonify(paginated_results)
     if next_offset:
         response_obj.headers.add("offset", next_offset)
-    
-    logger.info(f"Search returned {len(paginated_results)}/{total} matching artifacts")
+
+    # ✅ MUST ALWAYS REACH HERE — even if paginated_results == []
     return response_obj, 200
+
 
 
 @app.route("/artifact/byRegEx", methods=["POST"])

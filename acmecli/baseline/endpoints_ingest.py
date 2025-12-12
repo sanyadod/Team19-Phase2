@@ -23,9 +23,7 @@ except ImportError as e:
 
 
 def score_model(url: str) -> dict:
-
     if not SCORING_AVAILABLE:
-        # Mock scores for testing (all pass threshold)
         logger.warning("Using mock scores - Phase 1 scoring not available")
         return {
             "net_score": 0.75,
@@ -43,15 +41,14 @@ def score_model(url: str) -> dict:
                 "aws_server": 1.0
             }
         }
-    
+
     try:
-        # Use Phase 1 scoring system
         logger.info(f"Building context for {url}")
         ctx = build_context_from_api(url)
-        
+
         logger.info(f"Computing scores for {url}")
         scores = compute_all_scores(ctx)
-        
+
         return scores
     except Exception as e:
         logger.error(f"Failed to score model {url}: {e}", exc_info=True)
@@ -59,8 +56,6 @@ def score_model(url: str) -> dict:
 
 
 def check_ingestibility(scores: dict) -> tuple:
-
-    # Metrics that must be >= 0.5 (exclude latency and size_score)
     required_metrics = [
         "license",
         "ramp_up_time",
@@ -70,114 +65,99 @@ def check_ingestibility(scores: dict) -> tuple:
         "code_quality",
         "performance_claims"
     ]
-    
+
     failing_metrics = []
     for metric in required_metrics:
         score = scores.get(metric, 0)
         if score < 0.5:
             failing_metrics.append(f"{metric}={score:.2f}")
-    
+
     if failing_metrics:
-        reason = f"Model does not meet ingest criteria. Failing metrics: {', '.join(failing_metrics)}"
+        reason = (
+            "Model does not meet ingest criteria. "
+            f"Failing metrics: {', '.join(failing_metrics)}"
+        )
         logger.warning(reason)
         return False, reason
-    
+
     logger.info("Model meets all ingest criteria (all metrics >= 0.5)")
     return True, "Model meets all ingest criteria"
 
 
 @app.route("/artifacts/ingest", methods=["POST"])
 def ingest_artifact():
-
     try:
-        # Parse request body
         payload = request.get_json(silent=True)
-        
         if payload is None:
-            logger.error("Failed to parse JSON payload")
             abort(
                 400,
                 description="There is missing field(s) in the artifact_data or it is formed improperly."
             )
-        
-        # Validate required fields
+
         if "url" not in payload:
-            logger.error("Missing 'url' field in payload")
-            abort(
-                400,
-                description="Missing required field 'url' in request body."
-            )
-        
+            abort(400, description="Missing required field 'url' in request body.")
+
         url = payload.get("url", "").strip()
         if not url:
             abort(400, description="URL cannot be empty.")
-        
-        # Get artifact type (default to model)
+
+        # OPTIONAL but IMPORTANT: handle name explicitly
+        name = payload.get("name")
+        if name is not None:
+            name = name.strip()
+            if not name:
+                abort(400, description="Artifact name cannot be empty.")
+            logger.info(f"Using provided artifact name: {name}")
+        else:
+            logger.info("No artifact name provided; inferring from URL")
+
         artifact_type = payload.get("type", DEFAULT_TYPE)
-        
         if artifact_type not in VALID_TYPES:
-            logger.error(f"Invalid artifact type: {artifact_type}")
             abort(
                 400,
                 description=f"Invalid artifact type. Must be one of: {', '.join(VALID_TYPES)}."
             )
-        
-        # Validate HuggingFace URL
+
         if "huggingface.co/" not in url:
             abort(400, description="URL must be a HuggingFace model URL")
-        
-        logger.info(f"Ingest request: type={artifact_type}, url={url}")
-        
-        # Step 1: Score the model
-        logger.info("Step 1: Scoring model...")
-        try:
-            scores = score_model(url)
-            logger.info(f"Scoring complete. Net score: {scores.get('net_score', 'N/A')}")
-        except Exception as e:
-            logger.error(f"Scoring failed: {e}", exc_info=True)
-            abort(500, description=f"Failed to score model: {str(e)}")
-        
-        # Step 2: Check if model meets ingest criteria
-        logger.info("Step 2: Checking ingestibility...")
-        is_ingestible, reason = check_ingestibility(scores)
-        
-        if not is_ingestible:
-            logger.warning(f"Model rejected: {reason}")
-            abort(400, description=reason)
-        
-        logger.info("Model passed ingestibility check")
-        
-        # Step 3: Use upload module to create the artifact
-        logger.info("Step 3: Uploading artifact using upload module...")
-        
 
-        
-        # Create a mock request context for upload module
+        logger.info(f"Ingest request: type={artifact_type}, url={url}")
+
+        # Step 1: score
+        scores = score_model(url)
+
+        # Step 2: ingestibility
+        is_ingestible, reason = check_ingestibility(scores)
+        if not is_ingestible:
+            abort(400, description=reason)
+
+        # Step 3: forward payload to upload module
+        upload_payload = {"url": url}
+        if name is not None:
+            upload_payload["name"] = name
+
         with app.test_request_context(
             f"/artifact/{artifact_type}",
             method="POST",
-            json={"url": url},
+            json=upload_payload,
             content_type="application/json"
         ):
-            # Call the upload module's create_artifact function
-            response = upload_module.create_artifact(artifact_type)
-            
-            # response is a tuple: (response_body, status_code)
-            response_body, status_code = response
-            
-            # Parse the response
+            response_body, status_code = upload_module.create_artifact(artifact_type)
+
             if isinstance(response_body, str):
                 response_data = json.loads(response_body)
             else:
                 response_data = response_body.get_json()
-            
-            # Add scores to the response
+
             response_data["scores"] = scores
-            
-            logger.info(f"Successfully ingested artifact (ID: {response_data.get('metadata', {}).get('id')})")
-            
+
+            logger.info(
+                f"Successfully ingested artifact "
+                f"(ID: {response_data.get('metadata', {}).get('id')})"
+            )
+
             return jsonify(response_data), status_code
-    
+
     except Exception as e:
         logger.error(f"Unexpected error in ingest_artifact: {e}", exc_info=True)
         abort(500, description="The artifact registry encountered an error.")
@@ -186,4 +166,3 @@ def ingest_artifact():
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
     app.run(host="0.0.0.0", port=5006, debug=True)
-    
