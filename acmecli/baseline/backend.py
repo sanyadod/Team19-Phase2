@@ -7,6 +7,8 @@ import acmecli.baseline.download as download_module
 import acmecli.baseline.upload as upload_module
 import acmecli.baseline.reset as reset_module
 import acmecli.baseline.cost as cost_module
+import acmecli.baseline.rate as rate_module
+import acmecli.baseline.search as search_module
 import acmecli.baseline.tracks as tracks_module
 
 # Configure logging
@@ -17,6 +19,7 @@ logging.basicConfig(
 
 # Create a new Flask app
 app = Flask(__name__)
+
 # Enable CORS for all routes with permissive settings for development
 CORS(app, resources={r"/*": {"origins": "*", "methods": ["GET", "POST", "PUT", "DELETE", "OPTIONS"], "allow_headers": ["Content-Type", "X-Authorization"]}})
 
@@ -84,6 +87,16 @@ for rule in tracks_module.app.url_map.iter_rules():
             methods=rule.methods
         )
 
+# Register /rate routes
+for rule in rate_module.app.url_map.iter_rules():
+    # Skip the static route
+    if rule.endpoint != 'static':
+        app.add_url_rule(
+            rule.rule,
+            endpoint=f"rate_{rule.endpoint}",  # Prefix to avoid conflicts
+            view_func=rate_module.app.view_functions[rule.endpoint],
+            methods=rule.methods
+        )
 import acmecli.baseline.endpoints_list as list_module
 import acmecli.baseline.endpoints_search as search_module
 import acmecli.baseline.endpoints_ingest as ingest_module
