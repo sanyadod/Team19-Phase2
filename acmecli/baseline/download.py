@@ -334,12 +334,10 @@ def get_artifact(artifact_type: str, artifact_id: str):
     source_url = meta.get("source_url", "")
 
     # Use ID and type from DynamoDB to ensure consistency
-    #db_artifact_id = meta.get("id", artifact_id)          # <- keep original type
-    #db_artifact_type = meta.get("artifact_type", artifact_type)
+    db_artifact_id = meta.get("id", artifact_id)          # <- keep original type
+    db_artifact_type = meta.get("artifact_type", artifact_type)
 
-    db_artifact_id = meta["id"]
-    db_artifact_type = artifact_type
-
+   
 
     # 🔴 ALWAYS generate a presigned download URL
     presigned_url = _generate_presigned_url(bucket, key)
