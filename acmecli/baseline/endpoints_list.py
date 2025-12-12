@@ -57,7 +57,7 @@ def list_all_artifacts():
         
         # Apply pagination
         total = len(results)
-        end_idx = min(offset + PAGE_SIZE, total)  # ✅ FIXED: comma instead of plus
+        end_idx = min(offset + PAGE_SIZE, total) 
         paginated = results[offset:end_idx]
         
         # Calculate next offset
