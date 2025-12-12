@@ -291,21 +291,10 @@ def rate_v1(model_id: str):
 
 
 @app.route("/artifact/model/<model_id>/rate", methods=["GET", "OPTIONS"])
-def model_artifact_rate(id: str):
-    """
-    Implements GET /artifact/model/{id}/rate from the OpenAPI spec.
-
-    - OPTIONS: CORS preflight, no auth, no DB.
-    - GET:     Delegate to the v1 rating logic.
-    """
+def model_artifact_rate(model_id: str):
     if request.method == "OPTIONS":
-        # Preflight should succeed with no auth/DB work
         return ("", 200)
-
-    # Actual GET
-    return rate_v1(id)
-
-
+    return rate_v1(model_id)
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5001, debug=True)
