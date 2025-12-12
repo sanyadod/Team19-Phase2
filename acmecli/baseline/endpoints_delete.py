@@ -1,9 +1,7 @@
-from flask import Flask, request, jsonify, abort
+from flask import Flask, abort
 import boto3
 from botocore.exceptions import ClientError
 import logging
-import re
-import signal
 
 app = Flask(__name__)
 logger = logging.getLogger(__name__)
@@ -15,31 +13,50 @@ META_TABLE = DYNAMODB.Table("artifact")
 
 @app.route("/artifacts/<artifact_type>/<artifact_id>", methods=["DELETE"])
 def delete_artifact(artifact_type, artifact_id):
+    """
+    DELETE /artifacts/<artifact_type>/<artifact_id>
+
+    Deletes an artifact if it exists.
+    Returns:
+      200 if deleted
+      404 if not found or invalid ID
+    """
+
+    # Validate artifact_id is an integer
     try:
-        # Validate artifact_id format (autograder passes numeric strings)
-        try:
-            artifact_id_key = int(artifact_id)
-        except ValueError:
-            abort(404, description="Artifact not found")
+        artifact_id_key = int(artifact_id)
+    except ValueError:
+        abort(404, description="Artifact not found")
+        return
 
-        # Check existence first (important for correct 404)
-        try:
-            response = META_TABLE.get_item(Key={"id": artifact_id_key})
-        except ClientError as e:
-            logger.error("DynamoDB get_item failed", exc_info=True)
-            abort(500, description="Artifact storage error")
+    # Check if artifact exists
+    try:
+        response = META_TABLE.get_item(
+            Key={
+                "artifact_type": artifact_type,
+                "id": artifact_id_key
+            }
+        )
+    except ClientError as e:
+        logger.error(f"DynamoDB get_item failed: {e}", exc_info=True)
+        abort(500, description="Artifact storage error")
+        return
 
-        if "Item" not in response:
-            abort(404, description="Artifact not found")
+    if "Item" not in response:
+        abort(404, description="Artifact not found")
+        return
 
-        # Delete the artifact
-        META_TABLE.delete_item(Key={"id": artifact_id_key})
+    # Delete artifact
+    try:
+        META_TABLE.delete_item(
+            Key={
+                "artifact_type": artifact_type,
+                "id": artifact_id_key
+            }
+        )
+    except ClientError as e:
+        logger.error(f"DynamoDB delete_item failed: {e}", exc_info=True)
+        abort(500, description="Artifact storage error")
+        return
 
-        logger.info(f"Deleted artifact id={artifact_id_key}")
-
-        # Autograder accepts 200 or 204
-        return jsonify({"message": "Artifact deleted"}), 200
-
-    except Exception as e:
-        logger.error("Unexpected error during delete", exc_info=True)
-        abort(500, description="The artifact registry encountered an error.")
+    return "", 200
