@@ -37,15 +37,6 @@ def health():
     return "", 200
 
         
-# Register all routes from endpoints_delete.py
-for rule in delete_module.app.url_map.iter_rules():
-    if rule.endpoint != 'static':
-        app.add_url_rule(
-            rule.rule,
-            endpoint=f"delete_{rule.endpoint}",  # Prefix avoids conflicts
-            view_func=delete_module.app.view_functions[rule.endpoint],
-            methods=rule.methods
-        )
 
 # Register all routes from download.py
 for rule in download_module.app.url_map.iter_rules():
@@ -68,6 +59,17 @@ for rule in upload_module.app.url_map.iter_rules():
             view_func=upload_module.app.view_functions[rule.endpoint],
             methods=rule.methods
         )
+
+# Register all routes from endpoints_delete.py
+for rule in delete_module.app.url_map.iter_rules():
+    if rule.endpoint != 'static':
+        app.add_url_rule(
+            rule.rule,
+            endpoint=f"delete_{rule.endpoint}",
+            view_func=delete_module.app.view_functions[rule.endpoint],
+            methods=rule.methods
+        )
+
 
 #Register all routes from reset.py
 for rule in reset_module.app.url_map.iter_rules():
