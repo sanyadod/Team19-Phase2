@@ -80,22 +80,38 @@ def read_artifacts():
         q_name = query.get("name")
         q_types = query.get("types", [])
 
+        matched = []
+
         for item in items:
             if q_types and item.get("artifact_type") not in q_types:
                 continue
 
-            if q_id is not None and str(item.get("id")) != str(q_id):
-                continue
+            # ID match has highest priority
+            if q_id is not None:
+                if str(item.get("id")) == str(q_id):
+                    matched = [{
+                        "name": item.get("filename"),
+                        "id": item.get("id"),
+                        "type": item.get("artifact_type"),
+                    }]
+                break
 
-            if q_name is not None and q_name != "*" and item.get("filename") != q_name:
-                continue
+            # Name match
+            if q_name == "*":
+                matched.append({
+                    "name": item.get("filename"),
+                    "id": item.get("id"),
+                    "type": item.get("artifact_type"),
+                })
+            elif q_name is not None and item.get("filename") == q_name:
+                matched = [{
+                    "name": item.get("filename"),
+                    "id": item.get("id"),
+                    "type": item.get("artifact_type"),
+                }]
+                break
 
-            results.append({
-                "name": item.get("filename"),
-                "id": item.get("id"),
-                "type": item.get("artifact_type"),
-            })
-            break
+        results.extend(matched)
 
     return jsonify(results), 200
 
