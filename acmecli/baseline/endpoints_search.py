@@ -104,18 +104,6 @@ def safe_regex_match(pattern: str, text: str, timeout: int = REGEX_TIMEOUT_SECON
 
 def search_artifacts_internal(regex_str: str, offset: int = 0):
 
-    # ✅ 1. Validate input exists
-    if not regex_str or not regex_str.strip():
-        abort(400, description="Regex pattern cannot be empty")
-
-    regex_str = regex_str.strip()
-    logger.info(f"Searching artifacts with pattern: {regex_str}, offset: {offset}")
-
-    # ✅ 2. Check for malicious regex ONLY
-    if not is_safe_regex(regex_str):
-        logger.warning(f"Potentially malicious regex detected: {regex_str}")
-        abort(400, description="Malicious regex pattern detected")
-
     # ✅ 3. Validate regex syntax
     try:
         re.compile(regex_str, re.IGNORECASE)
