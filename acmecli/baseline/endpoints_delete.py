@@ -13,28 +13,19 @@ META_TABLE = DYNAMODB.Table("artifact")
 
 @app.route("/artifacts/<artifact_type>/<artifact_id>", methods=["DELETE"])
 def delete_artifact(artifact_type, artifact_id):
-    """
-    DELETE /artifacts/<artifact_type>/<artifact_id>
-
-    Deletes an artifact if it exists.
-    Returns:
-      200 if deleted
-      404 if not found or invalid ID
-    """
-
-    # Validate artifact_id is an integer
+    # Validate artifact_id
     try:
         artifact_id_key = int(artifact_id)
     except ValueError:
         abort(404, description="Artifact not found")
         return
 
-    # Check if artifact exists
+    # Look up artifact (MUST match table schema)
     try:
         response = META_TABLE.get_item(
             Key={
-                "artifact_type": artifact_type,
-                "id": artifact_id_key
+                "id": artifact_id_key,
+                "artifact_type": artifact_type
             }
         )
     except ClientError as e:
@@ -50,8 +41,8 @@ def delete_artifact(artifact_type, artifact_id):
     try:
         META_TABLE.delete_item(
             Key={
-                "artifact_type": artifact_type,
-                "id": artifact_id_key
+                "id": artifact_id_key,
+                "artifact_type": artifact_type
             }
         )
     except ClientError as e:
