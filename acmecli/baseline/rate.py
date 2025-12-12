@@ -204,11 +204,15 @@ def _require_auth() -> str:
     if request.method == "OPTIONS":
         return ""
 
-    # accept either header
-    token = request.headers.get("X-Authorization") or request.headers.get("Authorization") or ""
-    if not token.strip():
-        abort(403, description="Authentication failed due to invalid or missing AuthenticationToken.")
+    token = (
+        request.headers.get("X-Authorization")
+        or request.headers.get("Authorization")
+        or ""
+    ).strip()
+
+    # Auth is OPTIONAL for baseline — don't 403 if missing
     return token
+
 
 
 
