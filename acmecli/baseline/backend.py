@@ -3,9 +3,9 @@
 import logging
 from flask import Flask
 from flask_cors import CORS
+import acmecli.baseline.endpoints_delete as delete_module
 import acmecli.baseline.download as download_module
 import acmecli.baseline.upload as upload_module
-import acmecli.baseline.endpoints_delete as delete_module
 import acmecli.baseline.reset as reset_module
 import acmecli.baseline.cost as cost_module
 import acmecli.baseline.rate as rate_module
@@ -35,6 +35,17 @@ def health():
     Lightweight liveness probe. Returns HTTP 200 when the registry API is reachable.
     """
     return "", 200
+
+        
+# Register all routes from endpoints_delete.py
+for rule in delete_module.app.url_map.iter_rules():
+    if rule.endpoint != 'static':
+        app.add_url_rule(
+            rule.rule,
+            endpoint=f"delete_{rule.endpoint}",  # Prefix avoids conflicts
+            view_func=delete_module.app.view_functions[rule.endpoint],
+            methods=rule.methods
+        )
 
 # Register all routes from download.py
 for rule in download_module.app.url_map.iter_rules():
@@ -135,16 +146,7 @@ for rule in ingest_module.app.url_map.iter_rules():
             view_func=ingest_module.app.view_functions[rule.endpoint],
             methods=rule.methods
         )
-        
-# Register all routes from endpoints_delete.py
-for rule in delete_module.app.url_map.iter_rules():
-    if rule.endpoint != 'static':
-        app.add_url_rule(
-            rule.rule,
-            endpoint=f"delete_{rule.endpoint}",  # Prefix avoids conflicts
-            view_func=delete_module.app.view_functions[rule.endpoint],
-            methods=rule.methods
-        )
+
 
 
 
