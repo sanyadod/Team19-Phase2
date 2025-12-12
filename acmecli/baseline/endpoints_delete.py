@@ -13,31 +13,30 @@ META_TABLE = DYNAMODB.Table("artifact")
 
 @app.route("/artifacts/<artifact_type>/<artifact_id>", methods=["DELETE"])
 def delete_artifact(artifact_type, artifact_id):
-    # DO NOT cast artifact_id — must stay string
-    artifact_id_key = artifact_id
-
-    # Check existence (EXACT SAME KEY AS DOWNLOAD)
+    # Fetch item first (string id!)
     try:
         response = META_TABLE.get_item(
-            Key={"id": artifact_id_key}
+            Key={"id": artifact_id}
         )
     except ClientError as e:
-        logger.error(f"DynamoDB get_item failed: {e}", exc_info=True)
+        logger.error("DynamoDB get_item failed", exc_info=True)
         abort(500, description="The artifact storage encountered an error.")
-        return
 
-    if "Item" not in response:
+    item = response.get("Item")
+    if not item:
         abort(404, description="Artifact does not exist.")
-        return
 
-    # Delete artifact
+    # 🔴 CRITICAL: type must match
+    if item.get("artifact_type") != artifact_type:
+        abort(404, description="Artifact does not exist.")
+
+    # Delete
     try:
         META_TABLE.delete_item(
-            Key={"id": artifact_id_key}
+            Key={"id": artifact_id}
         )
     except ClientError as e:
-        logger.error(f"DynamoDB delete_item failed: {e}", exc_info=True)
+        logger.error("DynamoDB delete_item failed", exc_info=True)
         abort(500, description="The artifact storage encountered an error.")
-        return
 
     return "", 200
