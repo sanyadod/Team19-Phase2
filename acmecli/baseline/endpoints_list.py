@@ -80,35 +80,31 @@ def read_artifacts():
         q_name = query.get("name")
         q_types = query.get("types", [])
 
-        found = None
+        matches = []
 
         for item in items:
-            item_id = str(item.get("id"))
+            item_id = item.get("id")
             item_name = item.get("filename")
             item_type = item.get("artifact_type")
 
+            # types filter
             if q_types and item_type not in q_types:
                 continue
 
-            # ID has priority
+            # id has priority
             if q_id is not None:
-                if str(q_id) == item_id:
-                    found = item
-                    break
-                else:
-                    continue
+                if str(item_id) == str(q_id):
+                    matches.append(item)
+            else:
+                if q_name == "*" or (q_name is not None and item_name == q_name):
+                    matches.append(item)
 
-            # Name match
-            if q_name is not None:
-                if q_name == "*" or q_name == item_name:
-                    found = item
-                    break
-
-        if found:
+        if matches:
+            chosen = min(matches, key=lambda x: int(x.get("id")))
             results.append({
-                "name": found.get("filename"),
-                "id": found.get("id"),
-                "type": found.get("artifact_type"),
+                "name": chosen.get("filename"),
+                "id": chosen.get("id"),
+                "type": chosen.get("artifact_type"),
             })
 
     return jsonify(results), 200
