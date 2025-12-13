@@ -14,6 +14,14 @@ META_TABLE = DYNAMODB.Table("artifact")
 VALID_TYPES = {"model", "dataset", "code"}
 
 
+def _require_auth() -> str:
+    """Check for X-Authorization header."""
+    token = request.headers.get("X-Authorization")
+    if not token or not token.strip():
+        abort(403, description="Authentication failed due to invalid or missing AuthenticationToken.")
+    return token
+
+
 def _valid_type(artifact_type: str) -> bool:
     return artifact_type in VALID_TYPES
 
@@ -82,11 +90,11 @@ def _build_lineage_graph(artifact_id: str, artifact_type: str, all_artifacts: Li
             break
     
     if not start_artifact:
-        return {"nodes": [], "relationships": []}
+        return {"nodes": [], "edges": []}
     
     # Collect all related artifacts (parents and children)
     node_ids: Set[str] = {str(artifact_id)}
-    relationships: List[Dict[str, Any]] = []
+    edges: List[Dict[str, Any]] = []
     
     # Get parents from the artifact
     parents = start_artifact.get("parents", [])
@@ -99,10 +107,10 @@ def _build_lineage_graph(artifact_id: str, artifact_type: str, all_artifacts: Li
         parent_exists = any(str(item.get("id")) == parent_id_str for item in all_artifacts)
         if parent_exists:
             node_ids.add(parent_id_str)
-            relationships.append({
-                "source": _convert_id(parent_id),
-                "target": _convert_id(artifact_id),
-                "type": "parent_of"
+            edges.append({
+                "from_node_artifact_id": _convert_id(parent_id),
+                "to_node_artifact_id": _convert_id(artifact_id),
+                "relationship": "base_model"
             })
     
     # Find children (artifacts that have this artifact as a parent)
@@ -114,10 +122,10 @@ def _build_lineage_graph(artifact_id: str, artifact_type: str, all_artifacts: Li
         
         if str(artifact_id) in [str(p) for p in item_parents]:
             node_ids.add(item_id)
-            relationships.append({
-                "source": _convert_id(artifact_id),
-                "target": _convert_id(item.get("id")),
-                "type": "parent_of"
+            edges.append({
+                "from_node_artifact_id": _convert_id(artifact_id),
+                "to_node_artifact_id": _convert_id(item.get("id")),
+                "relationship": "base_model"
             })
     
     # Build nodes list
@@ -132,14 +140,14 @@ def _build_lineage_graph(artifact_id: str, artifact_type: str, all_artifacts: Li
         
         if node_artifact:
             nodes.append({
-                "id": _convert_id(node_artifact.get("id")),
-                "type": node_artifact.get("artifact_type", "unknown"),
-                "name": node_artifact.get("filename", str(node_artifact.get("id", "")))
+                "artifact_id": _convert_id(node_artifact.get("id")),
+                "name": node_artifact.get("filename", str(node_artifact.get("id", ""))),
+                "source": "config_json"
             })
     
     return {
         "nodes": nodes,
-        "relationships": relationships
+        "edges": edges
     }
 
 
@@ -149,6 +157,9 @@ def get_lineage(artifact_type: str, artifact_id: str):
     GET /artifact/<artifact_type>/<artifact_id>/lineage
     Get the lineage graph for an artifact, including its parents and children.
     """
+    # Require authentication
+    _require_auth()
+    
     # Validate artifact type
     if not _valid_type(artifact_type):
         abort(
@@ -171,6 +182,11 @@ def get_lineage(artifact_type: str, artifact_id: str):
 
     # Verify artifact exists
     metadata = _fetch_metadata(artifact_type, artifact_id)
+    
+    # Check if metadata is malformed (missing required fields for lineage)
+    # If artifact exists but has no valid structure, return 400
+    if not isinstance(metadata, dict):
+        abort(400, description="The lineage graph cannot be computed because the artifact metadata is missing or malformed.")
     
     # Get all artifacts to build the graph
     all_artifacts = _get_all_artifacts()
