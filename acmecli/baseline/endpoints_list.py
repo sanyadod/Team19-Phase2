@@ -27,13 +27,13 @@ def read_artifacts():
       - Flat list of artifacts: {id, name, type}
     """
 
-    # ---------- Step 0: Validate request ----------
+
     queries = request.get_json(silent=True)
 
     if not isinstance(queries, list) or len(queries) == 0:
         abort(400, description="Invalid artifact query")
 
-    # ---------- Step 1: Load ALL artifacts ----------
+
     try:
         response = META_TABLE.scan()
         all_items = response.get("Items", [])
@@ -49,7 +49,7 @@ def read_artifacts():
 
     results = []
 
-    # ---------- Step 2: Process queries independently ----------
+
     for query in queries:
         q_id = query.get("id")
         q_name = query.get("name")
@@ -58,22 +58,21 @@ def read_artifacts():
         # Start with all artifacts
         candidates = all_items
 
-        # ---------- Step 3: Apply type filter ----------
+
         if isinstance(q_types, list) and len(q_types) > 0:
             candidates = [
                 a for a in candidates
                 if a.get("artifact_type") in q_types
             ]
 
-        # ---------- Step 4: ID lookup (highest priority) ----------
+
         if q_id is not None:
-            # Scan ALL items - never stop early
+
             id_matches = []
             for a in candidates:
                 if str(a.get("id")) == str(q_id):
                     id_matches.append(a)
-            
-            # If multiple matches (shouldn't happen, but handle it), select lowest numeric ID
+
             if id_matches:
                 def id_as_int(x):
                     try:
@@ -90,7 +89,7 @@ def read_artifacts():
 
             continue  # move to next query
 
-        # ---------- Step 5: Name lookup ----------
+
         if q_name is not None:
 
             # ----- Wildcard -----
@@ -103,7 +102,7 @@ def read_artifacts():
                     })
                 continue
 
-            # ----- Exact name match (case-sensitive, no trimming) -----
+
             name_matches = []
             for a in candidates:
                 artifact_filename = a.get("filename")
@@ -114,7 +113,7 @@ def read_artifacts():
             if not name_matches:
                 continue
 
-            # Return ONLY ONE result: select the one with LOWEST numeric ID
+
             def id_as_int(x):
                 try:
                     return int(x.get("id"))
@@ -123,14 +122,13 @@ def read_artifacts():
 
             chosen = min(name_matches, key=id_as_int)
 
-            # Append exactly ONE result for this query
             results.append({
                 "id": chosen.get("id"),
                 "name": chosen.get("filename"),
                 "type": chosen.get("artifact_type")
             })
 
-    # ---------- Step 6: Return results ----------
+
     return jsonify(results), 200
 
 

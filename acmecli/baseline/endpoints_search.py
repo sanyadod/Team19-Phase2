@@ -4,6 +4,7 @@ from botocore.exceptions import ClientError
 import logging
 import re
 import signal
+from multiprocessing import Process, Queue
 
 app = Flask(__name__)
 logger = logging.getLogger(__name__)
@@ -61,45 +62,49 @@ def is_safe_regex(pattern: str) -> bool:
     return True
 
 
+def _regex_worker(pattern: str, text: str, result_queue: Queue):
+    """Run regex matching in a separate process."""
+    try:
+        compiled_pattern = re.compile(pattern, re.IGNORECASE)
+        result = compiled_pattern.search(text) is not None
+        result_queue.put(('success', result))
+    except re.error as e:
+        result_queue.put(('error', ValueError(f"Invalid regex pattern: {e}")))
+    except Exception as e:
+        result_queue.put(('error', e))
+
+
 def safe_regex_match(pattern: str, text: str, timeout: int = REGEX_TIMEOUT_SECONDS) -> bool:
     """
     Perform regex matching with timeout protection.
-    Uses Python's 're' module (not 'regex') to match autograder behavior.
+    Uses multiprocessing to actually kill slow regex operations.
+    Detects catastrophic backtracking (ReDoS attacks).
     """
-    import signal
+    result_queue = Queue()
+    process = Process(target=_regex_worker, args=(pattern, text, result_queue))
+    process.start()
+    process.join(timeout=timeout)
     
-    def timeout_handler(signum, frame):
+    # If process is still running, it timed out - kill it
+    if process.is_alive():
+        process.terminate()
+        process.join(timeout=1)  # Give it a moment to die
+        if process.is_alive():
+            process.kill()  # Force kill if needed
+        logger.warning(f"Regex timeout - potential ReDoS: {pattern}")
         raise TimeoutError("Regex matching timed out")
     
-    try:
-        # Set alarm (Unix-like systems only)
-        if hasattr(signal, 'SIGALRM'):
-            signal.signal(signal.SIGALRM, timeout_handler)
-            signal.alarm(timeout)
-        
-        # Compile and match
-        compiled_pattern = re.compile(pattern, re.IGNORECASE)
-        result = compiled_pattern.search(text) is not None
-        
-        # Cancel alarm
-        if hasattr(signal, 'SIGALRM'):
-            signal.alarm(0)
-        
-        return result
-        
-    except TimeoutError:
-        # Regex took too long - it's malicious!
-        if hasattr(signal, 'SIGALRM'):
-            signal.alarm(0)
-        logger.warning(f"Regex timeout - potential ReDoS: {pattern}")
-        raise  # Re-raise to trigger 400 error
-        
-    except re.error as e:
-        if hasattr(signal, 'SIGALRM'):
-            signal.alarm(0)
-        logger.error(f"Invalid regex: {e}")
-        raise ValueError(f"Invalid regex pattern: {e}")
-
+    # Get result from queue
+    if not result_queue.empty():
+        status, value = result_queue.get()
+        if status == 'error':
+            if isinstance(value, ValueError):
+                logger.error(f"Invalid regex: {value}")
+            raise value
+        return value
+    
+    # If we get here, something went wrong
+    return False
 
 
 def search_artifacts_internal(regex_str: str, offset: int = 0):
@@ -117,20 +122,28 @@ def search_artifacts_internal(regex_str: str, offset: int = 0):
         response = META_TABLE.scan(ExclusiveStartKey=response["LastEvaluatedKey"])
         all_items.extend(response.get("Items", []))
 
-    # ✅ 5. Try matching — DO NOT abort if no matches
+            # ✅ 5. Try matching — DO NOT abort if no matches
     results = []
     for item in all_items:
+        # Search across filename, type, and source_url
         searchable = " ".join([
-            item.get('filename', ''),
-            item.get('artifact_type', ''),
-            item.get('source_url', '')
+            str(item.get('filename', '') or ''),
+            str(item.get('artifact_type', '') or ''),
+            str(item.get('source_url', '') or '')
         ])
 
         try:
             if safe_regex_match(regex_str, searchable):
+                # Convert ID to int if possible, otherwise keep as string
+                artifact_id = item.get("id")
+                try:
+                    artifact_id = int(artifact_id)
+                except (TypeError, ValueError):
+                    pass
+                
                 results.append({
                     "name": item.get("filename", ""),
-                    "id": int(item.get("id")),
+                    "id": artifact_id,
                     "type": item.get("artifact_type", "")
                 })
         except TimeoutError:
