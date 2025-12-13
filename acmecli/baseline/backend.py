@@ -4,7 +4,6 @@ import logging
 from flask import Flask
 from flask_cors import CORS
 import acmecli.baseline.endpoints_delete as delete_module
-import acmecli.baseline.endpoints_list as list_module
 import acmecli.baseline.download as download_module
 import acmecli.baseline.upload as upload_module
 import acmecli.baseline.reset as reset_module
@@ -12,7 +11,7 @@ import acmecli.baseline.cost as cost_module
 import acmecli.baseline.rate as rate_module
 import acmecli.baseline.endpoints_search as search_module
 import acmecli.baseline.tracks as tracks_module
-
+import acmecli.baseline.endpoints_list as list_module
 import acmecli.baseline.endpoints_ingest as ingest_module
 import acmecli.baseline.endpoints_license as license_module
 import acmecli.baseline.endpoints_lineage as lineage_module
@@ -55,19 +54,7 @@ for rule in download_module.app.url_map.iter_rules():
         )
         """
 
-# Register all routes from download.py
-for rule in download_module.app.url_map.iter_rules():
-    # Skip the static route
-    if rule.endpoint != 'static':
-        # Skip POST /artifacts route - endpoints_list.py handles it
-        if rule.rule == '/artifacts' and 'POST' in rule.methods:
-            continue
-        app.add_url_rule(
-            rule.rule,
-            endpoint=f"download_{rule.endpoint}",  # Prefix to avoid conflicts
-            view_func=download_module.app.view_functions[rule.endpoint],
-            methods=rule.methods
-        )
+import acmecli.baseline.endpoints_list as list_module
 
 # Register all routes from upload.py
 for rule in upload_module.app.url_map.iter_rules():
