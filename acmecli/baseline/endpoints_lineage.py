@@ -18,15 +18,6 @@ VALID_TYPES = {"model", "dataset", "code"}
 # Helpers
 # -----------------------------
 
-def _require_auth() -> None:
-    token = request.headers.get("X-Authorization")
-    if not token or not token.strip():
-        abort(
-            403,
-            description="Authentication failed due to invalid or missing AuthenticationToken.",
-        )
-
-
 def _valid_type(artifact_type: str) -> bool:
     return artifact_type in VALID_TYPES
 
@@ -36,6 +27,7 @@ def _valid_id(artifact_id: str) -> bool:
 
 
 def _fetch_metadata(artifact_type: str, artifact_id: str) -> Dict[str, Any]:
+    """Fetch artifact metadata from DynamoDB."""
     try:
         resp = META_TABLE.get_item(Key={"id": artifact_id})
     except ClientError as e:
@@ -53,7 +45,7 @@ def _fetch_metadata(artifact_type: str, artifact_id: str) -> Dict[str, Any]:
 
 
 def _fetch_parent_metadata(parent_id: str) -> Dict[str, Any] | None:
-    """Best-effort lookup for parent name."""
+    """Best-effort lookup for parent artifact name."""
     try:
         resp = META_TABLE.get_item(Key={"id": parent_id})
         return resp.get("Item")
@@ -70,7 +62,7 @@ def _build_lineage_graph(start_artifact: Dict[str, Any], artifact_id: str) -> Di
     edges: List[Dict[str, Any]] = []
     seen_ids = set()
 
-    # Always add the starting artifact
+    # Always include the starting artifact
     start_id = str(start_artifact.get("id", artifact_id))
     start_name = (
         start_artifact.get("filename")
@@ -85,7 +77,7 @@ def _build_lineage_graph(start_artifact: Dict[str, Any], artifact_id: str) -> Di
     })
     seen_ids.add(start_id)
 
-    # Parents must be a list if present
+    # Parents are optional
     if "parents" not in start_artifact:
         return {"nodes": nodes, "edges": edges}
 
@@ -102,11 +94,11 @@ def _build_lineage_graph(start_artifact: Dict[str, Any], artifact_id: str) -> Di
 
         parent_id_str = str(parent_id)
 
-        # Lookup parent metadata for name if possible
+        # Best-effort lookup for parent name
         parent_meta = _fetch_parent_metadata(parent_id_str)
         parent_name = (
             parent_meta.get("filename")
-            if parent_meta
+            if parent_meta and parent_meta.get("filename")
             else parent_id_str
         )
 
@@ -133,18 +125,24 @@ def _build_lineage_graph(start_artifact: Dict[str, Any], artifact_id: str) -> Di
 
 @app.route("/artifact/<artifact_type>/<artifact_id>/lineage", methods=["GET"])
 def get_lineage(artifact_type: str, artifact_id: str):
-    _require_auth()
+    # ❗ NO AUTH FOR BASELINE (matches license-check)
 
     if not _valid_type(artifact_type):
         abort(
             400,
-            description="There is missing field(s) in the artifact_type or artifact_id or it is formed improperly, or is invalid.",
+            description=(
+                "There is missing field(s) in the artifact_type or artifact_id "
+                "or it is formed improperly, or is invalid."
+            ),
         )
 
     if not _valid_id(artifact_id):
         abort(
             400,
-            description="There is missing field(s) in the artifact_type or artifact_id or it is formed improperly, or is invalid.",
+            description=(
+                "There is missing field(s) in the artifact_type or artifact_id "
+                "or it is formed improperly, or is invalid."
+            ),
         )
 
     metadata = _fetch_metadata(artifact_type, artifact_id)
