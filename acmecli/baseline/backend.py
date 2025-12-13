@@ -13,6 +13,7 @@ import acmecli.baseline.endpoints_search as search_module
 import acmecli.baseline.tracks as tracks_module
 import acmecli.baseline.endpoints_list as list_module
 import acmecli.baseline.endpoints_ingest as ingest_module
+import acmecli.baseline.endpoints_license as license_module
 
 
 
@@ -148,6 +149,17 @@ for rule in ingest_module.app.url_map.iter_rules():
             rule.rule,
             endpoint=f"ingest_{rule.endpoint}",  # Prefix to avoid conflicts
             view_func=ingest_module.app.view_functions[rule.endpoint],
+            methods=rule.methods
+        )
+
+# Register all routes from endpoints_license.py
+for rule in license_module.app.url_map.iter_rules():
+    # Skip the static route
+    if rule.endpoint != 'static':
+        app.add_url_rule(
+            rule.rule,
+            endpoint=f"license_{rule.endpoint}",  # Prefix to avoid conflicts
+            view_func=license_module.app.view_functions[rule.endpoint],
             methods=rule.methods
         )
 
