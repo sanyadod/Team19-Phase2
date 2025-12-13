@@ -2,7 +2,6 @@ from flask import Flask, jsonify, request, abort
 import boto3
 from botocore.exceptions import ClientError
 import logging
-import re
 
 app = Flask(__name__)
 logger = logging.getLogger(__name__)
@@ -59,97 +58,114 @@ def list_all_artifacts():
 
 @app.route("/artifacts", methods=["POST"])
 def read_artifacts():
+    """
+    Artifact Read Endpoint
+    ----------------------
+    Accepts a list of queries and returns matching artifacts.
+
+    Query fields:
+      - id (optional)
+      - name (optional, can be "*")
+      - types (optional list)
+
+    Returns:
+      - Flat list of artifacts: {id, name, type}
+    """
+
+    # ---------- Step 0: Validate request ----------
     queries = request.get_json(silent=True)
-    if not isinstance(queries, list) or not queries:
+
+    if not isinstance(queries, list) or len(queries) == 0:
         abort(400, description="Invalid artifact query")
 
+    # ---------- Step 1: Load ALL artifacts ----------
     try:
         response = META_TABLE.scan()
-        items = response.get("Items", [])
+        all_items = response.get("Items", [])
+
         while "LastEvaluatedKey" in response:
             response = META_TABLE.scan(
                 ExclusiveStartKey=response["LastEvaluatedKey"]
             )
-            items.extend(response.get("Items", []))
+            all_items.extend(response.get("Items", []))
+
     except ClientError:
         abort(500, description="The artifact storage encountered an error.")
 
     results = []
 
+    # ---------- Step 2: Process queries independently ----------
     for query in queries:
         q_id = query.get("id")
         q_name = query.get("name")
-        q_types = query.get("types", [])
+        q_types = query.get("types")
 
-        matches = []
+        # Start with all artifacts
+        candidates = all_items
 
-        # Scan ALL items - never stop early
-        for item in items:
-            item_id = item.get("id")
-            item_name = item.get("filename")
-            item_type = item.get("artifact_type")
+        # ---------- Step 3: Apply type filter ----------
+        if isinstance(q_types, list) and len(q_types) > 0:
+            candidates = [
+                a for a in candidates
+                if a.get("artifact_type") in q_types
+            ]
 
-            # Filter by type if specified
-            if q_types and item_type not in q_types:
-                continue
+        # ---------- Step 4: ID lookup (highest priority) ----------
+        if q_id is not None:
+            match = None
+            for a in candidates:
+                if str(a.get("id")) == str(q_id):
+                    match = a
+                    break
 
-            # ID query: collect ALL matches (should be 0 or 1, but scan everything)
-            if q_id is not None:
-                if str(item_id) == str(q_id):
-                    matches.append(item)
-                # Continue scanning - don't break early
-                continue
+            if match:
+                results.append({
+                    "id": match.get("id"),
+                    "name": match.get("filename"),
+                    "type": match.get("artifact_type")
+                })
 
-            # Name query: only process if ID was not provided
-            if q_name is None or q_name == "":
-                continue
-                
+            continue  # move to next query
+
+        # ---------- Step 5: Name lookup ----------
+        if q_name is not None:
+
+            # ----- Wildcard -----
             if q_name == "*":
-                matches.append(item)
-            else:
-                # Try exact match first, then regex if exact doesn't match
-                if q_name == item_name:
-                    matches.append(item)
-                else:
-                    # Fall back to regex matching
-                    try:
-                        if re.fullmatch(q_name, item_name):
-                            matches.append(item)
-                    except re.error:
-                        continue
+                for a in candidates:
+                    results.append({
+                        "id": a.get("id"),
+                        "name": a.get("filename"),
+                        "type": a.get("artifact_type")
+                    })
+                continue
 
-        # Select the correct match based on spec rules
-        if matches:
-            # For ID queries, should only be 0 or 1 match
-            # For name queries, select the one with LOWEST numeric ID
-            def sort_key(x):
-                id_val = x.get("id")
+            # ----- Exact name match -----
+            name_matches = [
+                a for a in candidates
+                if a.get("filename") == q_name
+            ]
+
+            if not name_matches:
+                continue
+
+            # Deterministic selection: LOWEST numeric ID
+            def id_as_int(x):
                 try:
-                    # Numeric IDs: return as integer for proper numeric sorting
-                    return (0, int(id_val))
-                except (TypeError, ValueError):
-                    # String IDs: come after all numeric IDs
-                    return (1, str(id_val))
-            
-            matches.sort(key=sort_key)
-            chosen = matches[0]
-            
-            # Convert ID to int if possible for consistency
-            chosen_id = chosen.get("id")
-            try:
-                chosen_id = int(chosen_id)
-            except (TypeError, ValueError):
-                pass
-            
+                    return int(x.get("id"))
+                except Exception:
+                    return float("inf")
+
+            chosen = min(name_matches, key=id_as_int)
+
             results.append({
+                "id": chosen.get("id"),
                 "name": chosen.get("filename"),
-                "id": chosen_id,
-                "type": chosen.get("artifact_type"),
+                "type": chosen.get("artifact_type")
             })
 
+    # ---------- Step 6: Return results ----------
     return jsonify(results), 200
-
-
 
 
 if __name__ == "__main__":
