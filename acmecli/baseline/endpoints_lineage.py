@@ -68,49 +68,62 @@ def _get_all_artifacts() -> List[Dict[str, Any]]:
         return []
 
 
-def _normalize_id(id_value: Any) -> str:
-    """Normalize ID to string for consistent comparison and storage."""
+def _normalize_id_to_int(id_value: Any) -> int:
+    """Convert ID to integer. Raises ValueError if conversion fails."""
+    if id_value is None:
+        raise ValueError("ID cannot be None")
+    try:
+        return int(id_value)
+    except (TypeError, ValueError) as e:
+        raise ValueError(f"Cannot convert ID to integer: {id_value}") from e
+
+
+def _normalize_id_for_comparison(id_value: Any) -> str:
+    """Normalize ID to string for comparison purposes only."""
     if id_value is None:
         return ""
     return str(id_value)
 
 
-def _find_artifact_by_id(artifact_id: str, all_artifacts: List[Dict[str, Any]]) -> Dict[str, Any] | None:
+def _find_artifact_by_id(artifact_id: int, all_artifacts: List[Dict[str, Any]]) -> Dict[str, Any] | None:
     """Find an artifact by ID in the all_artifacts list."""
-    normalized_id = _normalize_id(artifact_id)
     for item in all_artifacts:
-        if _normalize_id(item.get("id")) == normalized_id:
-            return item
+        try:
+            item_id = int(item.get("id"))
+            if item_id == artifact_id:
+                return item
+        except (TypeError, ValueError):
+            continue
     return None
 
 
-def _build_lineage_graph(start_artifact: Dict[str, Any], artifact_id: str, all_artifacts: List[Dict[str, Any]]) -> Dict[str, Any]:
+def _build_lineage_graph(start_artifact: Dict[str, Any], artifact_id: int, all_artifacts: List[Dict[str, Any]]) -> Dict[str, Any]:
     """
     Build a transitive lineage graph starting from the given artifact.
     Recursively includes all ancestors (parents of parents) and descendants (children of children).
+    All IDs are normalized to integers to match OpenAPI schema.
     """
     # Track all nodes and edges we've discovered
-    nodes: Dict[str, Dict[str, Any]] = {}  # id -> node data
+    nodes: Dict[int, Dict[str, Any]] = {}  # id (int) -> node data
     edges: List[Dict[str, Any]] = []
-    visited: Set[str] = set()  # Track visited nodes to avoid cycles
+    visited: Set[int] = set()  # Track visited nodes to avoid cycles
     
-    def walk_up(parent_id: str) -> None:
+    def walk_up(parent_id: int) -> None:
         """Recursively walk up the parent chain."""
-        normalized_parent_id = _normalize_id(parent_id)
-        if normalized_parent_id in visited or not normalized_parent_id:
+        if parent_id in visited:
             return
         
-        visited.add(normalized_parent_id)
+        visited.add(parent_id)
         
         # Find the parent artifact
         parent_artifact = _find_artifact_by_id(parent_id, all_artifacts)
         if not parent_artifact:
             return
         
-        # Add parent node
-        parent_name = parent_artifact.get("filename") or parent_artifact.get("name") or normalized_parent_id
-        nodes[normalized_parent_id] = {
-            "artifact_id": parent_artifact.get("id"),  # Keep original type
+        # Add parent node (ID is already normalized to int)
+        parent_name = parent_artifact.get("filename") or parent_artifact.get("name") or str(parent_id)
+        nodes[parent_id] = {
+            "artifact_id": parent_id,  # Always integer
             "name": str(parent_name),
             "source": "config_json"
         }
@@ -118,35 +131,38 @@ def _build_lineage_graph(start_artifact: Dict[str, Any], artifact_id: str, all_a
         # Get parent's parents and recurse
         parent_parents = parent_artifact.get("parents", [])
         if isinstance(parent_parents, list):
-            for grandparent_id in parent_parents:
-                normalized_grandparent_id = _normalize_id(grandparent_id)
-                if normalized_grandparent_id:
+            for grandparent_id_raw in parent_parents:
+                try:
+                    grandparent_id = _normalize_id_to_int(grandparent_id_raw)
                     # Add edge: grandparent -> parent
                     edges.append({
-                        "from_node_artifact_id": grandparent_id,  # Keep original type
-                        "to_node_artifact_id": parent_artifact.get("id"),  # Keep original type
+                        "from_node_artifact_id": grandparent_id,  # Always integer
+                        "to_node_artifact_id": parent_id,  # Always integer
                         "relationship": "parent"
                     })
                     # Recurse
                     walk_up(grandparent_id)
+                except ValueError:
+                    # Skip malformed parent IDs
+                    logger.warning(f"Skipping malformed grandparent ID: {grandparent_id_raw}")
+                    continue
     
-    def walk_down(child_id: str) -> None:
+    def walk_down(child_id: int) -> None:
         """Recursively walk down the child chain."""
-        normalized_child_id = _normalize_id(child_id)
-        if normalized_child_id in visited or not normalized_child_id:
+        if child_id in visited:
             return
         
-        visited.add(normalized_child_id)
+        visited.add(child_id)
         
         # Find the child artifact
         child_artifact = _find_artifact_by_id(child_id, all_artifacts)
         if not child_artifact:
             return
         
-        # Add child node
-        child_name = child_artifact.get("filename") or child_artifact.get("name") or normalized_child_id
-        nodes[normalized_child_id] = {
-            "artifact_id": child_artifact.get("id"),  # Keep original type
+        # Add child node (ID is already normalized to int)
+        child_name = child_artifact.get("filename") or child_artifact.get("name") or str(child_id)
+        nodes[child_id] = {
+            "artifact_id": child_id,  # Always integer
             "name": str(child_name),
             "source": "config_json"
         }
@@ -155,26 +171,32 @@ def _build_lineage_graph(start_artifact: Dict[str, Any], artifact_id: str, all_a
         for item in all_artifacts:
             item_parents = item.get("parents", [])
             if isinstance(item_parents, list):
-                if any(_normalize_id(p) == normalized_child_id for p in item_parents):
-                    grandchild_id = item.get("id")
-                    normalized_grandchild_id = _normalize_id(grandchild_id)
-                    if normalized_grandchild_id:
-                        # Add edge: child -> grandchild
-                        edges.append({
-                            "from_node_artifact_id": child_artifact.get("id"),  # Keep original type
-                            "to_node_artifact_id": grandchild_id,  # Keep original type
-                            "relationship": "parent"
-                        })
-                        # Recurse
-                        walk_down(grandchild_id)
+                # Check if this item has child_id as a parent
+                try:
+                    item_id = int(item.get("id"))
+                    for p in item_parents:
+                        try:
+                            if int(p) == child_id:
+                                # Add edge: child -> grandchild
+                                edges.append({
+                                    "from_node_artifact_id": child_id,  # Always integer
+                                    "to_node_artifact_id": item_id,  # Always integer
+                                    "relationship": "parent"
+                                })
+                                # Recurse
+                                walk_down(item_id)
+                                break
+                        except (TypeError, ValueError):
+                            continue
+                except (TypeError, ValueError):
+                    continue
     
-    # Start with the artifact itself
-    normalized_start_id = _normalize_id(artifact_id)
-    visited.add(normalized_start_id)
+    # Start with the artifact itself (ID is already normalized to int)
+    visited.add(artifact_id)
     
-    start_name = start_artifact.get("filename") or start_artifact.get("name") or normalized_start_id
-    nodes[normalized_start_id] = {
-        "artifact_id": start_artifact.get("id"),  # Keep original type
+    start_name = start_artifact.get("filename") or start_artifact.get("name") or str(artifact_id)
+    nodes[artifact_id] = {
+        "artifact_id": artifact_id,  # Always integer
         "name": str(start_name),
         "source": "config_json"
     }
@@ -182,34 +204,45 @@ def _build_lineage_graph(start_artifact: Dict[str, Any], artifact_id: str, all_a
     # Walk up: get all ancestors
     parents = start_artifact.get("parents", [])
     if isinstance(parents, list):
-        for parent_id in parents:
-            normalized_parent_id = _normalize_id(parent_id)
-            if normalized_parent_id:
+        for parent_id_raw in parents:
+            try:
+                parent_id = _normalize_id_to_int(parent_id_raw)
                 # Add edge: parent -> start
                 edges.append({
-                    "from_node_artifact_id": parent_id,  # Keep original type
-                    "to_node_artifact_id": start_artifact.get("id"),  # Keep original type
+                    "from_node_artifact_id": parent_id,  # Always integer
+                    "to_node_artifact_id": artifact_id,  # Always integer
                     "relationship": "parent"
                 })
                 # Recurse up
                 walk_up(parent_id)
+            except ValueError:
+                # Skip malformed parent IDs
+                logger.warning(f"Skipping malformed parent ID: {parent_id_raw}")
+                continue
     
     # Walk down: get all descendants
     for item in all_artifacts:
         item_parents = item.get("parents", [])
         if isinstance(item_parents, list):
-            if any(_normalize_id(p) == normalized_start_id for p in item_parents):
-                child_id = item.get("id")
-                normalized_child_id = _normalize_id(child_id)
-                if normalized_child_id:
-                    # Add edge: start -> child
-                    edges.append({
-                        "from_node_artifact_id": start_artifact.get("id"),  # Keep original type
-                        "to_node_artifact_id": child_id,  # Keep original type
-                        "relationship": "parent"
-                    })
-                    # Recurse down
-                    walk_down(child_id)
+            # Check if this item has artifact_id as a parent
+            for p in item_parents:
+                try:
+                    if int(p) == artifact_id:
+                        try:
+                            child_id = int(item.get("id"))
+                            # Add edge: start -> child
+                            edges.append({
+                                "from_node_artifact_id": artifact_id,  # Always integer
+                                "to_node_artifact_id": child_id,  # Always integer
+                                "relationship": "parent"
+                            })
+                            # Recurse down
+                            walk_down(child_id)
+                        except (TypeError, ValueError):
+                            continue
+                        break
+                except (TypeError, ValueError):
+                    continue
     
     return {
         "nodes": list(nodes.values()),
@@ -236,7 +269,7 @@ def get_lineage(artifact_type: str, artifact_id: str):
             ),
         )
     
-    # Validate artifact ID (minimal validation - treat IDs as opaque strings)
+    # Validate artifact ID (minimal validation)
     if not artifact_id or not artifact_id.strip():
         abort(
             400,
@@ -245,8 +278,21 @@ def get_lineage(artifact_type: str, artifact_id: str):
                 "or it is formed improperly, or is invalid."
             ),
         )
+    
+    # Normalize artifact_id to integer (OpenAPI schema requires integers)
+    try:
+        artifact_id_int = _normalize_id_to_int(artifact_id)
+    except ValueError as e:
+        logger.error(f"Artifact ID cannot be converted to integer: {artifact_id}, error: {e}")
+        abort(
+            400,
+            description=(
+                "There is missing field(s) in the artifact_type or artifact_id "
+                "or it is formed improperly, or is invalid."
+            ),
+        )
 
-    # Verify artifact exists
+    # Verify artifact exists (use string for DynamoDB lookup)
     metadata = _fetch_metadata(artifact_type, artifact_id)
     
     # Check if metadata is malformed (missing required fields for lineage)
@@ -254,12 +300,49 @@ def get_lineage(artifact_type: str, artifact_id: str):
     if not isinstance(metadata, dict):
         abort(400, description="The lineage graph cannot be computed because the artifact metadata is missing or malformed.")
     
+    # Normalize the starting artifact's ID to integer
+    try:
+        metadata["id"] = _normalize_id_to_int(metadata.get("id"))
+        # Normalize parent IDs to integers
+        if "parents" in metadata and isinstance(metadata["parents"], list):
+            normalized_parents = []
+            for p in metadata["parents"]:
+                try:
+                    normalized_parents.append(_normalize_id_to_int(p))
+                except ValueError:
+                    logger.warning(f"Skipping malformed parent ID in metadata: {p}")
+            metadata["parents"] = normalized_parents
+    except ValueError as e:
+        logger.error(f"Starting artifact has malformed ID: {metadata.get('id')}, error: {e}")
+        abort(400, description="The lineage graph cannot be computed because the artifact metadata is missing or malformed.")
+    
     # Get all artifacts to build the graph
     all_artifacts = _get_all_artifacts()
     
-    # Build lineage graph
+    # Normalize all artifact IDs and parent IDs to integers
+    normalized_artifacts = []
+    for item in all_artifacts:
+        try:
+            normalized_item = item.copy()
+            normalized_item["id"] = _normalize_id_to_int(item.get("id"))
+            # Normalize parent IDs
+            if "parents" in normalized_item and isinstance(normalized_item["parents"], list):
+                normalized_parents = []
+                for p in normalized_item["parents"]:
+                    try:
+                        normalized_parents.append(_normalize_id_to_int(p))
+                    except ValueError:
+                        logger.warning(f"Skipping malformed parent ID: {p}")
+                normalized_item["parents"] = normalized_parents
+            normalized_artifacts.append(normalized_item)
+        except ValueError:
+            # Skip artifacts with malformed IDs
+            logger.warning(f"Skipping artifact with malformed ID: {item.get('id')}")
+            continue
+    
+    # Build lineage graph (use normalized integer ID)
     try:
-        graph = _build_lineage_graph(metadata, artifact_id, all_artifacts)
+        graph = _build_lineage_graph(metadata, artifact_id_int, normalized_artifacts)
     except Exception as e:
         logger.error(f"Error building lineage graph: {e}", exc_info=True)
         abort(400, description="The lineage graph cannot be computed because the artifact metadata is missing or malformed.")
