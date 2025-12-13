@@ -69,12 +69,30 @@ def _get_all_artifacts() -> List[Dict[str, Any]]:
         return []
 
 
-def _convert_id(id_value: Any) -> Any:
-    """Convert ID to int if possible, otherwise keep as string."""
+def _convert_id(id_value: Any) -> int:
+    """
+    Convert ID to int. 
+    The OpenAPI schema requires artifact_id to always be an integer.
+    If conversion fails, raise an error as this indicates malformed data.
+    """
     try:
-        return int(id_value)
-    except (TypeError, ValueError):
-        return str(id_value)
+        # Handle None or empty values
+        if id_value is None:
+            raise ValueError("ID cannot be None")
+        
+        # Convert to int - this handles strings, numbers, etc.
+        result = int(id_value)
+        
+        # Ensure it's a valid positive integer (artifact IDs should be positive)
+        if result < 0:
+            raise ValueError(f"ID must be non-negative, got {result}")
+        
+        return result
+    except (TypeError, ValueError) as e:
+        # If we can't convert to int, this is a data quality issue
+        # Log it and raise to trigger 400 response
+        logger.error(f"Invalid artifact ID format: {id_value} (type: {type(id_value)}), error: {e}")
+        raise ValueError(f"Cannot convert artifact ID to integer: {id_value}") from e
 
 
 def _build_lineage_graph(start_artifact: Dict[str, Any], artifact_id: str, all_artifacts: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -92,16 +110,24 @@ def _build_lineage_graph(start_artifact: Dict[str, Any], artifact_id: str, all_a
         parents = []
     
     for parent_id in parents:
-        parent_id_str = str(parent_id)
-        # Only add parent if it exists in the database
-        parent_exists = any(str(item.get("id")) == parent_id_str for item in all_artifacts)
-        if parent_exists:
-            node_ids.add(parent_id_str)
-            edges.append({
-                "from_node_artifact_id": _convert_id(parent_id),
-                "to_node_artifact_id": _convert_id(artifact_id),
-                "relationship": "base_model"
-            })
+        try:
+            parent_id_str = str(parent_id)
+            # Only add parent if it exists in the database
+            parent_exists = any(str(item.get("id")) == parent_id_str for item in all_artifacts)
+            if parent_exists:
+                node_ids.add(parent_id_str)
+                # Convert IDs to int - if this fails, skip this parent
+                from_id = _convert_id(parent_id)
+                to_id = _convert_id(artifact_id)
+                edges.append({
+                    "from_node_artifact_id": from_id,
+                    "to_node_artifact_id": to_id,
+                    "relationship": "base_model"
+                })
+        except (ValueError, TypeError) as e:
+            # Skip malformed parent IDs
+            logger.warning(f"Skipping malformed parent ID: {parent_id}, error: {e}")
+            continue
     
     # Find children (artifacts that have this artifact as a parent)
     for item in all_artifacts:
@@ -111,23 +137,38 @@ def _build_lineage_graph(start_artifact: Dict[str, Any], artifact_id: str, all_a
             item_parents = []
         
         if str(artifact_id) in [str(p) for p in item_parents]:
-            node_ids.add(item_id)
-            edges.append({
-                "from_node_artifact_id": _convert_id(artifact_id),
-                "to_node_artifact_id": _convert_id(item.get("id")),
-                "relationship": "base_model"
-            })
+            try:
+                node_ids.add(item_id)
+                # Convert IDs to int - if this fails, skip this child
+                from_id = _convert_id(artifact_id)
+                to_id = _convert_id(item.get("id"))
+                edges.append({
+                    "from_node_artifact_id": from_id,
+                    "to_node_artifact_id": to_id,
+                    "relationship": "base_model"
+                })
+            except (ValueError, TypeError) as e:
+                # Skip malformed child IDs
+                logger.warning(f"Skipping malformed child ID: {item.get('id')}, error: {e}")
+                continue
     
     # Build nodes list - always include the starting artifact first
     nodes: List[Dict[str, Any]] = []
     
     # Add the starting artifact first
-    artifact_name = start_artifact.get("filename") or start_artifact.get("name") or str(start_artifact.get("id", ""))
-    nodes.append({
-        "artifact_id": _convert_id(start_artifact.get("id")),
-        "name": str(artifact_name),
-        "source": "config_json"
-    })
+    # The starting artifact ID must be convertible to int (this is validated earlier)
+    try:
+        artifact_id_int = _convert_id(start_artifact.get("id"))
+        artifact_name = start_artifact.get("filename") or start_artifact.get("name") or str(start_artifact.get("id", ""))
+        nodes.append({
+            "artifact_id": artifact_id_int,
+            "name": str(artifact_name),
+            "source": "config_json"
+        })
+    except (ValueError, TypeError) as e:
+        # If the starting artifact ID is malformed, this is a critical error
+        logger.error(f"Starting artifact has malformed ID: {start_artifact.get('id')}, error: {e}")
+        raise ValueError(f"Starting artifact ID cannot be converted to integer: {start_artifact.get('id')}") from e
     
     # Add other nodes (parents and children)
     for node_id in node_ids:
@@ -142,12 +183,18 @@ def _build_lineage_graph(start_artifact: Dict[str, Any], artifact_id: str, all_a
                 break
         
         if node_artifact:
-            node_name = node_artifact.get("filename") or node_artifact.get("name") or str(node_artifact.get("id", ""))
-            nodes.append({
-                "artifact_id": _convert_id(node_artifact.get("id")),
-                "name": str(node_name),
-                "source": "config_json"
-            })
+            try:
+                node_id_int = _convert_id(node_artifact.get("id"))
+                node_name = node_artifact.get("filename") or node_artifact.get("name") or str(node_artifact.get("id", ""))
+                nodes.append({
+                    "artifact_id": node_id_int,
+                    "name": str(node_name),
+                    "source": "config_json"
+                })
+            except (ValueError, TypeError) as e:
+                # Skip malformed node IDs
+                logger.warning(f"Skipping node with malformed ID: {node_artifact.get('id')}, error: {e}")
+                continue
     
     return {
         "nodes": nodes,
@@ -176,6 +223,19 @@ def get_lineage(artifact_type: str, artifact_id: str):
     
     # Validate artifact ID
     if not _valid_id(artifact_id):
+        abort(
+            400,
+            description=(
+                "There is missing field(s) in the artifact_type or artifact_id "
+                "or it is formed improperly, or is invalid."
+            ),
+        )
+    
+    # Validate that artifact_id can be converted to integer (required by OpenAPI schema)
+    try:
+        artifact_id_int = _convert_id(artifact_id)
+    except (ValueError, TypeError) as e:
+        logger.error(f"Artifact ID cannot be converted to integer: {artifact_id}, error: {e}")
         abort(
             400,
             description=(
