@@ -1,4 +1,4 @@
-from flask import Flask, request, jsonify, abort
+from flask import Flask, jsonify, abort
 import boto3
 from botocore.exceptions import ClientError
 import logging
@@ -27,7 +27,6 @@ def _valid_id(artifact_id: str) -> bool:
 
 
 def _fetch_metadata(artifact_type: str, artifact_id: str) -> Dict[str, Any]:
-    """Fetch artifact metadata from DynamoDB."""
     try:
         resp = META_TABLE.get_item(Key={"id": artifact_id})
     except ClientError as e:
@@ -44,8 +43,24 @@ def _fetch_metadata(artifact_type: str, artifact_id: str) -> Dict[str, Any]:
     return item
 
 
+def _scan_all_artifacts() -> List[Dict[str, Any]]:
+    try:
+        response = META_TABLE.scan()
+        items = response.get("Items", [])
+
+        while "LastEvaluatedKey" in response:
+            response = META_TABLE.scan(
+                ExclusiveStartKey=response["LastEvaluatedKey"]
+            )
+            items.extend(response.get("Items", []))
+
+        return items
+    except ClientError as e:
+        logger.error("DynamoDB scan failed: %s", e, exc_info=True)
+        return []
+
+
 def _fetch_parent_metadata(parent_id: str) -> Dict[str, Any] | None:
-    """Best-effort lookup for parent artifact name."""
     try:
         resp = META_TABLE.get_item(Key={"id": parent_id})
         return resp.get("Item")
@@ -62,7 +77,7 @@ def _build_lineage_graph(start_artifact: Dict[str, Any], artifact_id: str) -> Di
     edges: List[Dict[str, Any]] = []
     seen_ids = set()
 
-    # Always include the starting artifact
+    # --- Start node ---
     start_id = str(start_artifact.get("id", artifact_id))
     start_name = (
         start_artifact.get("filename")
@@ -77,44 +92,70 @@ def _build_lineage_graph(start_artifact: Dict[str, Any], artifact_id: str) -> Di
     })
     seen_ids.add(start_id)
 
-    # Parents are optional
-    if "parents" not in start_artifact:
-        return {"nodes": nodes, "edges": edges}
+    # --- Parents (1-hop) ---
+    if "parents" in start_artifact:
+        parents = start_artifact.get("parents")
+        if not isinstance(parents, list):
+            abort(
+                400,
+                description="The lineage graph cannot be computed because the artifact metadata is missing or malformed.",
+            )
 
-    parents = start_artifact.get("parents")
-    if not isinstance(parents, list):
-        abort(
-            400,
-            description="The lineage graph cannot be computed because the artifact metadata is missing or malformed.",
-        )
+        for parent_id in parents:
+            if not parent_id:
+                continue
 
-    for parent_id in parents:
-        if not parent_id:
+            parent_id_str = str(parent_id)
+            parent_meta = _fetch_parent_metadata(parent_id_str)
+            parent_name = (
+                parent_meta.get("filename")
+                if parent_meta and parent_meta.get("filename")
+                else parent_id_str
+            )
+
+            if parent_id_str not in seen_ids:
+                nodes.append({
+                    "artifact_id": parent_id_str,
+                    "name": str(parent_name),
+                    "source": "config_json",
+                })
+                seen_ids.add(parent_id_str)
+
+            edges.append({
+                "from_node_artifact_id": parent_id_str,
+                "to_node_artifact_id": start_id,
+                "relationship": "base_model",
+            })
+
+    # --- Children (1-hop) ---
+    all_artifacts = _scan_all_artifacts()
+
+    for item in all_artifacts:
+        item_parents = item.get("parents")
+        if not isinstance(item_parents, list):
             continue
 
-        parent_id_str = str(parent_id)
+        if start_id in [str(p) for p in item_parents]:
+            child_id = str(item.get("id"))
+            child_name = (
+                item.get("filename")
+                or item.get("name")
+                or child_id
+            )
 
-        # Best-effort lookup for parent name
-        parent_meta = _fetch_parent_metadata(parent_id_str)
-        parent_name = (
-            parent_meta.get("filename")
-            if parent_meta and parent_meta.get("filename")
-            else parent_id_str
-        )
+            if child_id not in seen_ids:
+                nodes.append({
+                    "artifact_id": child_id,
+                    "name": str(child_name),
+                    "source": "config_json",
+                })
+                seen_ids.add(child_id)
 
-        if parent_id_str not in seen_ids:
-            nodes.append({
-                "artifact_id": parent_id_str,
-                "name": str(parent_name),
-                "source": "config_json",
+            edges.append({
+                "from_node_artifact_id": start_id,
+                "to_node_artifact_id": child_id,
+                "relationship": "base_model",
             })
-            seen_ids.add(parent_id_str)
-
-        edges.append({
-            "from_node_artifact_id": parent_id_str,
-            "to_node_artifact_id": start_id,
-            "relationship": "base_model",
-        })
 
     return {"nodes": nodes, "edges": edges}
 
