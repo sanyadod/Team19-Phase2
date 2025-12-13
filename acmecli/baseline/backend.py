@@ -13,7 +13,7 @@ import acmecli.baseline.endpoints_search as search_module
 import acmecli.baseline.tracks as tracks_module
 import acmecli.baseline.endpoints_list as list_module
 import acmecli.baseline.endpoints_ingest as ingest_module
-import acmecli.baseline.endpoints_stubs as stubs_module
+
 
 
 
@@ -148,15 +148,6 @@ for rule in ingest_module.app.url_map.iter_rules():
             rule.rule,
             endpoint=f"ingest_{rule.endpoint}",  # Prefix to avoid conflicts
             view_func=ingest_module.app.view_functions[rule.endpoint],
-            methods=rule.methods
-        )
-
-for rule in stubs_module.app.url_map.iter_rules():
-    if rule.endpoint != "static":
-        app.add_url_rule(
-            rule.rule,
-            endpoint=f"stub_{rule.endpoint}",
-            view_func=stubs_module.app.view_functions[rule.endpoint],
             methods=rule.methods
         )
 
