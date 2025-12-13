@@ -124,16 +124,18 @@ def search_artifacts_internal(regex_str: str, offset: int = 0):
 
             # ✅ 5. Try matching — DO NOT abort if no matches
     results = []
+        # ✅ 5. Try matching — DO NOT abort if no matches
+    results = []
     for item in all_items:
-     
-        searchable_parts = []
-        
-        for key, value in item.items():
-            if isinstance(value, str):
-                searchable_parts.append(value)
-        
-        searchable = " ".join(searchable_parts)
+        # Search across filename, type, and source_url
+        searchable = " ".join([
+            str(item.get('filename', '') or ''),
+            str(item.get('artifact_type', '') or ''),
+            str(item.get('source_url', '') or '')
+        ])
 
+        try:
+            if safe_regex_match(regex_str, searchable):
 
         try:
             if safe_regex_match(regex_str, searchable):
