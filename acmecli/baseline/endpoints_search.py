@@ -4,6 +4,8 @@ from botocore.exceptions import ClientError
 import logging
 import re
 import signal
+import threading
+import time
 
 app = Flask(__name__)
 logger = logging.getLogger(__name__)
@@ -64,42 +66,43 @@ def is_safe_regex(pattern: str) -> bool:
 def safe_regex_match(pattern: str, text: str, timeout: int = REGEX_TIMEOUT_SECONDS) -> bool:
     """
     Perform regex matching with timeout protection.
-    Uses Python's 're' module (not 'regex') to match autograder behavior.
+    Uses Python's 're' module with cross-platform timeout detection.
+    Detects catastrophic backtracking (ReDoS attacks).
     """
-    import signal
+    result_container = {'value': None, 'done': False}
+    exception_container = {'value': None}
     
-    def timeout_handler(signum, frame):
+    def regex_worker():
+        """Run regex matching in a separate thread."""
+        try:
+            compiled_pattern = re.compile(pattern, re.IGNORECASE)
+            result_container['value'] = compiled_pattern.search(text) is not None
+            result_container['done'] = True
+        except re.error as e:
+            exception_container['value'] = ValueError(f"Invalid regex pattern: {e}")
+            result_container['done'] = True
+        except Exception as e:
+            exception_container['value'] = e
+            result_container['done'] = True
+    
+    # Start regex matching in a thread
+    thread = threading.Thread(target=regex_worker, daemon=True)
+    thread.start()
+    thread.join(timeout=timeout)
+    
+    # Check if thread is still running (timeout occurred)
+    if thread.is_alive():
+        logger.warning(f"Regex timeout - potential ReDoS: {pattern}")
         raise TimeoutError("Regex matching timed out")
     
-    try:
-        # Set alarm (Unix-like systems only)
-        if hasattr(signal, 'SIGALRM'):
-            signal.signal(signal.SIGALRM, timeout_handler)
-            signal.alarm(timeout)
-        
-        # Compile and match
-        compiled_pattern = re.compile(pattern, re.IGNORECASE)
-        result = compiled_pattern.search(text) is not None
-        
-        # Cancel alarm
-        if hasattr(signal, 'SIGALRM'):
-            signal.alarm(0)
-        
-        return result
-        
-    except TimeoutError:
-        # Regex took too long - it's malicious!
-        if hasattr(signal, 'SIGALRM'):
-            signal.alarm(0)
-        logger.warning(f"Regex timeout - potential ReDoS: {pattern}")
-        raise  # Re-raise to trigger 400 error
-        
-    except re.error as e:
-        if hasattr(signal, 'SIGALRM'):
-            signal.alarm(0)
-        logger.error(f"Invalid regex: {e}")
-        raise ValueError(f"Invalid regex pattern: {e}")
-
+    # Check for exceptions
+    if exception_container['value']:
+        if isinstance(exception_container['value'], ValueError):
+            logger.error(f"Invalid regex: {exception_container['value']}")
+        raise exception_container['value']
+    
+    # Return result
+    return result_container['value'] if result_container['value'] is not None else False
 
 
 def search_artifacts_internal(regex_str: str, offset: int = 0):
