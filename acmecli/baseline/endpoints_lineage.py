@@ -221,17 +221,26 @@ def _build_lineage_graph(start_artifact: Dict[str, Any], artifact_id: Any, all_a
                             logger.warning(f"Could not convert IDs to int for edge: {child_id} -> {item_id}")
                         break
     
-    # Start with the artifact itself
-    normalized_start_id = _normalize_id_for_comparison(artifact_id)
+    # Start with the artifact itself - ensure it's always in the graph
+    # Get the actual ID from the artifact metadata (may differ from URL param)
+    start_id_from_db = start_artifact.get("id", artifact_id)
+    normalized_start_id = _normalize_id_for_comparison(start_id_from_db)
     visited.add(normalized_start_id)
-    add_node(artifact_id, start_artifact)
     
-    # Normalize start artifact ID to int for edges
+    # Normalize start artifact ID to int for nodes and edges
     try:
-        start_artifact_id_int = _normalize_id_to_int(start_artifact.get("id", artifact_id))
+        start_artifact_id_int = _normalize_id_to_int(start_id_from_db)
     except (ValueError, TypeError) as e:
-        logger.error(f"Could not convert start artifact ID to int: {artifact_id}, error: {e}")
-        raise ValueError(f"Start artifact ID cannot be converted to integer: {artifact_id}")
+        logger.error(f"Could not convert start artifact ID to int: {start_id_from_db} (from artifact) or {artifact_id} (from URL), error: {e}")
+        raise ValueError(f"Start artifact ID cannot be converted to integer: {start_id_from_db}")
+    
+    # Add the start node directly (bypassing add_node to ensure it's always added even if no parents)
+    start_name = start_artifact.get("filename") or start_artifact.get("name") or str(start_artifact_id_int)
+    nodes[normalized_start_id] = {
+        "artifact_id": start_artifact_id_int,
+        "name": str(start_name),
+        "source": "config_json"
+    }
     
     # Walk up: get all ancestors
     parents = start_artifact.get("parents", [])
@@ -277,7 +286,7 @@ def _build_lineage_graph(start_artifact: Dict[str, Any], artifact_id: Any, all_a
                     break
     
     # Ensure graph consistency: all edges reference existing nodes
-    # Build a set of normalized node IDs for comparison
+    # Build a set of normalized node IDs for comparison (using int IDs from nodes)
     node_ids_normalized = {_normalize_id_for_comparison(n["artifact_id"]) for n in nodes.values()}
     valid_edges = []
     for edge in edges:
@@ -287,12 +296,18 @@ def _build_lineage_graph(start_artifact: Dict[str, Any], artifact_id: Any, all_a
         if from_id_normalized in node_ids_normalized and to_id_normalized in node_ids_normalized:
             valid_edges.append(edge)
         else:
-            logger.warning(f"Skipping edge with missing node: {edge}")
+            logger.warning(f"Skipping edge with missing node: from={edge['from_node_artifact_id']}, to={edge['to_node_artifact_id']}, available_nodes={node_ids_normalized}")
     
-    return {
+    # Ensure we always return at least the start artifact (even with no edges)
+    result = {
         "nodes": list(nodes.values()),
         "edges": valid_edges
     }
+    
+    # Log the result for debugging
+    logger.info(f"Lineage graph built: {len(result['nodes'])} nodes, {len(result['edges'])} edges for artifact {artifact_id}")
+    
+    return result
 
 
 @app.route("/artifact/<artifact_type>/<artifact_id>/lineage", methods=["GET"])
