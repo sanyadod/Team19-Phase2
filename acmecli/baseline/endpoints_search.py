@@ -4,8 +4,7 @@ from botocore.exceptions import ClientError
 import logging
 import re
 import signal
-import threading
-import time
+from multiprocessing import Process, Queue
 
 app = Flask(__name__)
 logger = logging.getLogger(__name__)
@@ -63,46 +62,49 @@ def is_safe_regex(pattern: str) -> bool:
     return True
 
 
+def _regex_worker(pattern: str, text: str, result_queue: Queue):
+    """Run regex matching in a separate process."""
+    try:
+        compiled_pattern = re.compile(pattern, re.IGNORECASE)
+        result = compiled_pattern.search(text) is not None
+        result_queue.put(('success', result))
+    except re.error as e:
+        result_queue.put(('error', ValueError(f"Invalid regex pattern: {e}")))
+    except Exception as e:
+        result_queue.put(('error', e))
+
+
 def safe_regex_match(pattern: str, text: str, timeout: int = REGEX_TIMEOUT_SECONDS) -> bool:
     """
     Perform regex matching with timeout protection.
-    Uses Python's 're' module with cross-platform timeout detection.
+    Uses multiprocessing to actually kill slow regex operations.
     Detects catastrophic backtracking (ReDoS attacks).
     """
-    result_container = {'value': None, 'done': False}
-    exception_container = {'value': None}
+    result_queue = Queue()
+    process = Process(target=_regex_worker, args=(pattern, text, result_queue))
+    process.start()
+    process.join(timeout=timeout)
     
-    def regex_worker():
-        """Run regex matching in a separate thread."""
-        try:
-            compiled_pattern = re.compile(pattern, re.IGNORECASE)
-            result_container['value'] = compiled_pattern.search(text) is not None
-            result_container['done'] = True
-        except re.error as e:
-            exception_container['value'] = ValueError(f"Invalid regex pattern: {e}")
-            result_container['done'] = True
-        except Exception as e:
-            exception_container['value'] = e
-            result_container['done'] = True
-    
-    # Start regex matching in a thread
-    thread = threading.Thread(target=regex_worker, daemon=True)
-    thread.start()
-    thread.join(timeout=timeout)
-    
-    # Check if thread is still running (timeout occurred)
-    if thread.is_alive():
+    # If process is still running, it timed out - kill it
+    if process.is_alive():
+        process.terminate()
+        process.join(timeout=1)  # Give it a moment to die
+        if process.is_alive():
+            process.kill()  # Force kill if needed
         logger.warning(f"Regex timeout - potential ReDoS: {pattern}")
         raise TimeoutError("Regex matching timed out")
     
-    # Check for exceptions
-    if exception_container['value']:
-        if isinstance(exception_container['value'], ValueError):
-            logger.error(f"Invalid regex: {exception_container['value']}")
-        raise exception_container['value']
+    # Get result from queue
+    if not result_queue.empty():
+        status, value = result_queue.get()
+        if status == 'error':
+            if isinstance(value, ValueError):
+                logger.error(f"Invalid regex: {value}")
+            raise value
+        return value
     
-    # Return result
-    return result_container['value'] if result_container['value'] is not None else False
+    # If we get here, something went wrong
+    return False
 
 
 def search_artifacts_internal(regex_str: str, offset: int = 0):
