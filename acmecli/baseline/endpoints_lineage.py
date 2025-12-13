@@ -101,14 +101,15 @@ def _build_lineage_graph(start_artifact: Dict[str, Any], artifact_id: Any, all_a
     seen_ids: Set[str] = set()
     
     # Get the start artifact's ID (treat as opaque string, like other endpoints)
-    start_id = start_artifact.get("id", artifact_id)
-    start_id_str = str(start_id)  # Normalize to string for comparison
+    # DynamoDB may return Decimal or other types, so convert to string explicitly
+    start_id_raw = start_artifact.get("id", artifact_id)
+    start_id = str(start_id_raw)  # Convert to string explicitly for schema compliance
     normalized_start_id = _normalize_id_for_comparison(start_id)
     
     # Step 1: Add the starting artifact
-    start_name = start_artifact.get("filename") or start_artifact.get("name") or start_id_str
+    start_name = start_artifact.get("filename") or start_artifact.get("name") or start_id
     nodes.append({
-        "artifact_id": start_id,  # Keep original type (string) from DynamoDB
+        "artifact_id": start_id,  # String type for schema compliance
         "name": str(start_name),
         "source": "config_json"
     })
@@ -125,11 +126,12 @@ def _build_lineage_graph(start_artifact: Dict[str, Any], artifact_id: Any, all_a
             # Only include parent if it exists in DynamoDB
             parent_artifact = _find_artifact_by_id(parent_id, all_artifacts)
             if parent_artifact:
-                parent_id_value = parent_artifact.get("id", parent_id)
-                parent_name = parent_artifact.get("filename") or parent_artifact.get("name") or str(parent_id_value)
+                parent_id_raw = parent_artifact.get("id", parent_id)
+                parent_id_value = str(parent_id_raw)  # Convert to string explicitly
+                parent_name = parent_artifact.get("filename") or parent_artifact.get("name") or parent_id_value
                 
                 nodes.append({
-                    "artifact_id": parent_id_value,  # Keep original type (string)
+                    "artifact_id": parent_id_value,  # String type for schema compliance
                     "name": str(parent_name),
                     "source": "config_json"
                 })
@@ -137,8 +139,8 @@ def _build_lineage_graph(start_artifact: Dict[str, Any], artifact_id: Any, all_a
                 
                 # Add edge: parent -> start
                 edges.append({
-                    "from_node_artifact_id": parent_id_value,  # Keep original type (string)
-                    "to_node_artifact_id": start_id,  # Keep original type (string)
+                    "from_node_artifact_id": parent_id_value,  # String type for schema compliance
+                    "to_node_artifact_id": start_id,  # String type for schema compliance
                     "relationship": "base_model"
                 })
     
@@ -149,10 +151,11 @@ def _build_lineage_graph(start_artifact: Dict[str, Any], artifact_id: Any, all_a
             continue
         
         # Check if this artifact has start_id as a parent
-        artifact_id_value = artifact.get("id")
-        if not artifact_id_value:
+        artifact_id_raw = artifact.get("id")
+        if not artifact_id_raw:
             continue
         
+        artifact_id_value = str(artifact_id_raw)  # Convert to string explicitly
         normalized_artifact_id = _normalize_id_for_comparison(artifact_id_value)
         
         # Check if start_id is in this artifact's parents list
@@ -160,9 +163,9 @@ def _build_lineage_graph(start_artifact: Dict[str, Any], artifact_id: Any, all_a
             if _normalize_id_for_comparison(p) == normalized_start_id:
                 # This is a direct child
                 if normalized_artifact_id not in seen_ids:
-                    child_name = artifact.get("filename") or artifact.get("name") or str(artifact_id_value)
+                    child_name = artifact.get("filename") or artifact.get("name") or artifact_id_value
                     nodes.append({
-                        "artifact_id": artifact_id_value,  # Keep original type (string)
+                        "artifact_id": artifact_id_value,  # String type for schema compliance
                         "name": str(child_name),
                         "source": "config_json"
                     })
@@ -170,8 +173,8 @@ def _build_lineage_graph(start_artifact: Dict[str, Any], artifact_id: Any, all_a
                 
                 # Add edge: start -> child
                 edges.append({
-                    "from_node_artifact_id": start_id,  # Keep original type (string)
-                    "to_node_artifact_id": artifact_id_value,  # Keep original type (string)
+                    "from_node_artifact_id": start_id,  # String type for schema compliance
+                    "to_node_artifact_id": artifact_id_value,  # String type for schema compliance
                     "relationship": "base_model"
                 })
                 break  # Only add one edge per child
