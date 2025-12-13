@@ -59,9 +59,20 @@ def list_all_artifacts():
 
 @app.route("/artifacts", methods=["POST"])
 def read_artifacts():
-    queries = request.get_json(silent=True)
+    """POST /artifacts - Query artifacts by ID or name."""
+    try:
+        queries = request.get_json(force=True, silent=True)
+        if queries is None:
+            queries = request.get_json(silent=True)
+    except Exception as e:
+        logger.error("JSON parse failed: %s", e, exc_info=True)
+        abort(400, description="There is missing field(s) in the artifact_query or it is formed improperly, or is invalid.")
+
+    if queries is None:
+        abort(400, description="There is missing field(s) in the artifact_query or it is formed improperly, or is invalid.")
+
     if not isinstance(queries, list) or not queries:
-        abort(400, description="Invalid artifact query")
+        abort(400, description="There is missing field(s) in the artifact_query or it is formed improperly, or is invalid.")
 
     try:
         response = META_TABLE.scan()
@@ -71,12 +82,16 @@ def read_artifacts():
                 ExclusiveStartKey=response["LastEvaluatedKey"]
             )
             items.extend(response.get("Items", []))
-    except ClientError:
+    except ClientError as e:
+        logger.error("DynamoDB scan failed: %s", e, exc_info=True)
         abort(500, description="The artifact storage encountered an error.")
 
     results = []
 
     for query in queries:
+        if not isinstance(query, dict):
+            continue
+            
         q_id = query.get("id")
         q_name = query.get("name")
         q_types = query.get("types", [])
@@ -88,31 +103,49 @@ def read_artifacts():
             item_name = item.get("filename")
             item_type = item.get("artifact_type")
 
+            # Filter by type if specified
             if q_types and item_type not in q_types:
                 continue
 
-            # ID has absolute priority
+            # ID has absolute priority - if ID is provided, match by ID only
             if q_id is not None:
+                # Compare as strings to handle both int and string IDs
                 if str(item_id) == str(q_id):
                     matches = [item]
                     break
                 continue
 
+            # If no ID specified, match by name
+            if q_name is None:
+                continue
+                
             if q_name == "*":
                 matches.append(item)
-            else:
-                try:
-                    if re.fullmatch(q_name, item_name):
-                        matches.append(item)
-                except re.error:
-                    continue
+            elif item_name and q_name == item_name:  # Exact match (not regex)
+                matches.append(item)
 
         if matches:
-            matches.sort(key=lambda x: int(x["id"]))
+            # Sort matches - handle both int and string IDs gracefully
+            def sort_key(x):
+                item_id = x.get("id")
+                try:
+                    return (0, int(item_id))  # Int IDs sort first
+                except (TypeError, ValueError):
+                    return (1, str(item_id))  # String IDs sort after
+            
+            matches.sort(key=sort_key)
             chosen = matches[0]
+            
+            # Convert ID to int if possible (like list_all_artifacts does)
+            chosen_id = chosen.get("id")
+            try:
+                artifact_id = int(chosen_id)
+            except (TypeError, ValueError):
+                artifact_id = chosen_id
+            
             results.append({
                 "name": chosen.get("filename"),
-                "id": chosen.get("id"),
+                "id": artifact_id,
                 "type": chosen.get("artifact_type"),
             })
 
