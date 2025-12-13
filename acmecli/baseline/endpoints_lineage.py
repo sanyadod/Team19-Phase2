@@ -2,7 +2,7 @@ from flask import Flask, request, jsonify, abort
 import boto3
 from botocore.exceptions import ClientError
 import logging
-from typing import Dict, List, Any, Set
+from typing import Dict, List, Any, Set, Optional
 
 app = Flask(__name__)
 logger = logging.getLogger(__name__)
@@ -75,7 +75,7 @@ def _normalize_id_for_comparison(id_value: Any) -> str:
     return str(id_value)
 
 
-def _find_artifact_by_id(artifact_id: Any, all_artifacts: List[Dict[str, Any]]) -> Dict[str, Any] | None:
+def _find_artifact_by_id(artifact_id: Any, all_artifacts: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
     """Find an artifact by ID in the all_artifacts list. Treat IDs as opaque."""
     normalized_id = _normalize_id_for_comparison(artifact_id)
     for item in all_artifacts:
