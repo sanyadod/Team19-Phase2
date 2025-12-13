@@ -122,14 +122,14 @@ def search_artifacts_internal(regex_str: str, offset: int = 0):
         response = META_TABLE.scan(ExclusiveStartKey=response["LastEvaluatedKey"])
         all_items.extend(response.get("Items", []))
 
-        # ✅ 5. Try matching — DO NOT abort if no matches
+            # ✅ 5. Try matching — DO NOT abort if no matches
     results = []
     for item in all_items:
         # Search across filename, type, and source_url
         searchable = " ".join([
-            str(item.get('filename', '')),
-            str(item.get('artifact_type', '')),
-            str(item.get('source_url', ''))
+            str(item.get('filename', '') or ''),
+            str(item.get('artifact_type', '') or ''),
+            str(item.get('source_url', '') or '')
         ])
 
         try:
