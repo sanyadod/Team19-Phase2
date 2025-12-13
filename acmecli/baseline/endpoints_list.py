@@ -80,40 +80,39 @@ def read_artifacts():
         q_name = query.get("name")
         q_types = query.get("types", [])
 
-        matched = []
+        found = None
 
         for item in items:
-            if q_types and item.get("artifact_type") not in q_types:
+            item_id = str(item.get("id"))
+            item_name = item.get("filename")
+            item_type = item.get("artifact_type")
+
+            if q_types and item_type not in q_types:
                 continue
 
-            # ID match has highest priority
+            # ID has priority
             if q_id is not None:
-                if str(item.get("id")) == str(q_id):
-                    matched = [{
-                        "name": item.get("filename"),
-                        "id": item.get("id"),
-                        "type": item.get("artifact_type"),
-                    }]
-                break
+                if str(q_id) == item_id:
+                    found = item
+                    break
+                else:
+                    continue
 
             # Name match
-            if q_name == "*":
-                matched.append({
-                    "name": item.get("filename"),
-                    "id": item.get("id"),
-                    "type": item.get("artifact_type"),
-                })
-            elif q_name is not None and item.get("filename") == q_name:
-                matched = [{
-                    "name": item.get("filename"),
-                    "id": item.get("id"),
-                    "type": item.get("artifact_type"),
-                }]
-                break
+            if q_name is not None:
+                if q_name == "*" or q_name == item_name:
+                    found = item
+                    break
 
-        results.extend(matched)
+        if found:
+            results.append({
+                "name": found.get("filename"),
+                "id": found.get("id"),
+                "type": found.get("artifact_type"),
+            })
 
     return jsonify(results), 200
+
 
 
 if __name__ == "__main__":
