@@ -2,6 +2,7 @@ from flask import Flask, jsonify, request, abort
 import boto3
 from botocore.exceptions import ClientError
 import logging
+import re
 
 app = Flask(__name__)
 logger = logging.getLogger(__name__)
@@ -87,20 +88,32 @@ def read_artifacts():
             item_name = item.get("filename")
             item_type = item.get("artifact_type")
 
-            # types filter
+            # Type filter
             if q_types and item_type not in q_types:
                 continue
 
-            # id has priority
+            # ID has highest priority
             if q_id is not None:
                 if str(item_id) == str(q_id):
+                    matches = [item]
+                    break
+                continue
+
+            # Name match (regex semantics)
+            if q_name is not None:
+                if q_name == "*":
                     matches.append(item)
-            else:
-                if q_name == "*" or (q_name is not None and item_name == q_name):
-                    matches.append(item)
+                else:
+                    try:
+                        if re.fullmatch(q_name, item_name):
+                            matches.append(item)
+                    except re.error:
+                        continue
 
         if matches:
-            chosen = min(matches, key=lambda x: int(x.get("id")))
+            # Select lowest numeric ID
+            matches.sort(key=lambda x: int(x["id"]))
+            chosen = matches[0]
             results.append({
                 "name": chosen.get("filename"),
                 "id": chosen.get("id"),
