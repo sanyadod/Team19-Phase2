@@ -1,4 +1,4 @@
-from flask import Flask, abort
+"""from flask import Flask, abort
 
 app = Flask(__name__)
 
@@ -25,3 +25,4 @@ def permissions_stub(artifact_type, artifact_id):
 @app.route("/artifact/<artifact_type>/<artifact_id>/license-check", methods=["POST"])
 def license_check_stub(artifact_type, artifact_id):
     abort(501, description="Not implemented")
+"""
