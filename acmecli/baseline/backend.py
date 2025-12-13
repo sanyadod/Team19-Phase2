@@ -4,6 +4,7 @@ import logging
 from flask import Flask
 from flask_cors import CORS
 import acmecli.baseline.endpoints_delete as delete_module
+import acmecli.baseline.endpoints_list as list_module
 import acmecli.baseline.download as download_module
 import acmecli.baseline.upload as upload_module
 import acmecli.baseline.reset as reset_module
@@ -11,7 +12,7 @@ import acmecli.baseline.cost as cost_module
 import acmecli.baseline.rate as rate_module
 import acmecli.baseline.endpoints_search as search_module
 import acmecli.baseline.tracks as tracks_module
-import acmecli.baseline.endpoints_list as list_module
+
 import acmecli.baseline.endpoints_ingest as ingest_module
 import acmecli.baseline.endpoints_license as license_module
 import acmecli.baseline.endpoints_lineage as lineage_module
