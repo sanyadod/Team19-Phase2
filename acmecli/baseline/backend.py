@@ -41,7 +41,6 @@ def health():
     return "", 200
 
         
-"""
 # Register all routes from download.py
 for rule in download_module.app.url_map.iter_rules():
     # Skip the static route
@@ -52,9 +51,8 @@ for rule in download_module.app.url_map.iter_rules():
             view_func=download_module.app.view_functions[rule.endpoint],
             methods=rule.methods
         )
-        """
 
-import acmecli.baseline.endpoints_list as list_module
+
 
 # Register all routes from upload.py
 for rule in upload_module.app.url_map.iter_rules():
