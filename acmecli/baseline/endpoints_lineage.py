@@ -84,100 +84,89 @@ def _find_artifact_by_id(artifact_id: Any, all_artifacts: List[Dict[str, Any]]) 
     return None
 
 
-def _build_lineage_graph(start_artifact: Dict[str, Any], artifact_id: Any, all_artifacts: List[Dict[str, Any]]) -> Dict[str, Any]:
+def _build_lineage_graph(start_artifact: Dict[str, Any], artifact_id: Any) -> Dict[str, Any]:
     """
-    Build a baseline one-hop lineage graph for the given artifact.
+    Build a baseline lineage graph from the artifact's metadata.
     
-    Baseline lineage includes:
-    - The artifact itself
-    - Its direct parents (one hop up)
-    - Its direct children (one hop down)
-    
-    IDs are treated as opaque strings (like upload/download endpoints).
-    Only includes artifacts that exist in DynamoDB.
+    Baseline lineage:
+    - Always includes the artifact itself
+    - Includes parents declared in metadata (if present)
+    - Does NOT infer children (no reverse traversal)
+    - Does NOT recurse
     """
     nodes: List[Dict[str, Any]] = []
     edges: List[Dict[str, Any]] = []
-    seen_ids: Set[str] = set()
     
-    # Get the start artifact's ID (treat as opaque string, like other endpoints)
-    # DynamoDB may return Decimal or other types, so convert to string explicitly
-    start_id_raw = start_artifact.get("id", artifact_id)
-    start_id = str(start_id_raw)  # Convert to string explicitly for schema compliance
-    normalized_start_id = _normalize_id_for_comparison(start_id)
+    # Get the artifact's ID (treat as opaque string)
+    artifact_id_value = start_artifact.get("id", artifact_id)
+    artifact_id_str = str(artifact_id_value)  # Ensure string type
     
-    # Step 1: Add the starting artifact
-    start_name = start_artifact.get("filename") or start_artifact.get("name") or start_id
+    # Always add the artifact itself as a node
+    artifact_name = start_artifact.get("filename") or start_artifact.get("name") or artifact_id_str
     nodes.append({
-        "artifact_id": start_id,  # String type for schema compliance
-        "name": str(start_name),
+        "artifact_id": artifact_id_str,
+        "name": str(artifact_name),
         "source": "config_json"
     })
-    seen_ids.add(normalized_start_id)
     
-    # Step 2: Add direct parents (only if they exist in DynamoDB)
-    parents = start_artifact.get("parents", [])
-    if isinstance(parents, list):
-        for parent_id in parents:
-            normalized_parent_id = _normalize_id_for_comparison(parent_id)
-            if not normalized_parent_id or normalized_parent_id in seen_ids:
-                continue
-            
-            # Only include parent if it exists in DynamoDB
-            parent_artifact = _find_artifact_by_id(parent_id, all_artifacts)
-            if parent_artifact:
-                parent_id_raw = parent_artifact.get("id", parent_id)
-                parent_id_value = str(parent_id_raw)  # Convert to string explicitly
-                parent_name = parent_artifact.get("filename") or parent_artifact.get("name") or parent_id_value
-                
-                nodes.append({
-                    "artifact_id": parent_id_value,  # String type for schema compliance
-                    "name": str(parent_name),
-                    "source": "config_json"
-                })
-                seen_ids.add(normalized_parent_id)
-                
-                # Add edge: parent -> start
-                edges.append({
-                    "from_node_artifact_id": parent_id_value,  # String type for schema compliance
-                    "to_node_artifact_id": start_id,  # String type for schema compliance
-                    "relationship": "base_model"
-                })
+    # If no parents field, return single-node graph with empty edges
+    if "parents" not in start_artifact:
+        return {
+            "nodes": nodes,
+            "edges": edges
+        }
     
-    # Step 3: Add direct children (only artifacts that exist in DynamoDB)
-    for artifact in all_artifacts:
-        artifact_parents = artifact.get("parents", [])
-        if not isinstance(artifact_parents, list):
+    # Parents must be a list
+    parents = start_artifact.get("parents")
+    if not isinstance(parents, list):
+        # Malformed parents field - return single-node graph
+        return {
+            "nodes": nodes,
+            "edges": edges
+        }
+    
+    # Process each parent in the parents list
+    for parent in parents:
+        # Handle two possible parent formats:
+        # 1. Simple: parent is just an ID (string or number)
+        # 2. Structured: parent is an object with artifact_id, name, relationship
+        
+        if isinstance(parent, dict):
+            # Structured format: { artifact_id, name, relationship }
+            parent_artifact_id = parent.get("artifact_id") or parent.get("id")
+            parent_name = parent.get("name")
+            parent_relationship = parent.get("relationship", "base_model")
+        else:
+            # Simple format: parent is just an ID
+            parent_artifact_id = parent
+            parent_name = None
+            parent_relationship = "base_model"
+        
+        if not parent_artifact_id:
             continue
         
-        # Check if this artifact has start_id as a parent
-        artifact_id_raw = artifact.get("id")
-        if not artifact_id_raw:
-            continue
+        parent_artifact_id_str = str(parent_artifact_id)
         
-        artifact_id_value = str(artifact_id_raw)  # Convert to string explicitly
-        normalized_artifact_id = _normalize_id_for_comparison(artifact_id_value)
+        # Add parent node
+        if parent_name:
+            nodes.append({
+                "artifact_id": parent_artifact_id_str,
+                "name": str(parent_name),
+                "source": "config_json"
+            })
+        else:
+            nodes.append({
+                "artifact_id": parent_artifact_id_str,
+                "name": parent_artifact_id_str,  # Use ID as name if no name provided
+                "source": "config_json"
+            })
         
-        # Check if start_id is in this artifact's parents list
-        for p in artifact_parents:
-            if _normalize_id_for_comparison(p) == normalized_start_id:
-                # This is a direct child
-                if normalized_artifact_id not in seen_ids:
-                    child_name = artifact.get("filename") or artifact.get("name") or artifact_id_value
-                    nodes.append({
-                        "artifact_id": artifact_id_value,  # String type for schema compliance
-                        "name": str(child_name),
-                        "source": "config_json"
-                    })
-                    seen_ids.add(normalized_artifact_id)
-                
-                # Add edge: start -> child
-                edges.append({
-                    "from_node_artifact_id": start_id,  # String type for schema compliance
-                    "to_node_artifact_id": artifact_id_value,  # String type for schema compliance
-                    "relationship": "base_model"
-                })
-                break  # Only add one edge per child
+        # Add edge: parent -> artifact
+        edges.append({
+            "from_node_artifact_id": parent_artifact_id_str,
+            "to_node_artifact_id": artifact_id_str,
+            "relationship": str(parent_relationship)
+        })
     
     return {
         "nodes": nodes,
@@ -217,17 +206,13 @@ def get_lineage(artifact_type: str, artifact_id: str):
     # Verify artifact exists (treat ID as opaque, like download.py does)
     metadata = _fetch_metadata(artifact_type, artifact_id)
     
-    # Check if metadata is malformed (missing required fields for lineage)
-    # If artifact exists but has no valid structure, return 400
+    # Check if metadata is malformed
     if not isinstance(metadata, dict):
         abort(400, description="The lineage graph cannot be computed because the artifact metadata is missing or malformed.")
     
-    # Get all artifacts to build the graph (treat IDs as opaque, no normalization)
-    all_artifacts = _get_all_artifacts()
-    
-    # Build lineage graph
+    # Build lineage graph from metadata only (no reverse traversal)
     try:
-        graph = _build_lineage_graph(metadata, artifact_id, all_artifacts)
+        graph = _build_lineage_graph(metadata, artifact_id)
     except Exception as e:
         logger.error(f"Error building lineage graph: {e}", exc_info=True)
         abort(400, description="The lineage graph cannot be computed because the artifact metadata is missing or malformed.")
