@@ -77,21 +77,11 @@ def _convert_id(id_value: Any) -> Any:
         return str(id_value)
 
 
-def _build_lineage_graph(artifact_id: str, artifact_type: str, all_artifacts: List[Dict[str, Any]]) -> Dict[str, Any]:
+def _build_lineage_graph(start_artifact: Dict[str, Any], artifact_id: str, all_artifacts: List[Dict[str, Any]]) -> Dict[str, Any]:
     """
     Build a lineage graph starting from the given artifact.
     Includes the artifact itself, its parents, and any children.
     """
-    # Find the starting artifact
-    start_artifact = None
-    for item in all_artifacts:
-        if str(item.get("id")) == str(artifact_id) and item.get("artifact_type") == artifact_type:
-            start_artifact = item
-            break
-    
-    if not start_artifact:
-        return {"nodes": [], "edges": []}
-    
     # Collect all related artifacts (parents and children)
     node_ids: Set[str] = {str(artifact_id)}
     edges: List[Dict[str, Any]] = []
@@ -128,9 +118,22 @@ def _build_lineage_graph(artifact_id: str, artifact_type: str, all_artifacts: Li
                 "relationship": "base_model"
             })
     
-    # Build nodes list
+    # Build nodes list - always include the starting artifact first
     nodes: List[Dict[str, Any]] = []
+    
+    # Add the starting artifact first
+    artifact_name = start_artifact.get("filename") or start_artifact.get("name") or str(start_artifact.get("id", ""))
+    nodes.append({
+        "artifact_id": _convert_id(start_artifact.get("id")),
+        "name": str(artifact_name),
+        "source": "config_json"
+    })
+    
+    # Add other nodes (parents and children)
     for node_id in node_ids:
+        if str(node_id) == str(artifact_id):
+            continue  # Already added
+        
         # Find the artifact for this node
         node_artifact = None
         for item in all_artifacts:
@@ -139,9 +142,10 @@ def _build_lineage_graph(artifact_id: str, artifact_type: str, all_artifacts: Li
                 break
         
         if node_artifact:
+            node_name = node_artifact.get("filename") or node_artifact.get("name") or str(node_artifact.get("id", ""))
             nodes.append({
                 "artifact_id": _convert_id(node_artifact.get("id")),
-                "name": node_artifact.get("filename", str(node_artifact.get("id", ""))),
+                "name": str(node_name),
                 "source": "config_json"
             })
     
@@ -192,7 +196,15 @@ def get_lineage(artifact_type: str, artifact_id: str):
     all_artifacts = _get_all_artifacts()
     
     # Build lineage graph
-    graph = _build_lineage_graph(artifact_id, artifact_type, all_artifacts)
+    try:
+        graph = _build_lineage_graph(metadata, artifact_id, all_artifacts)
+    except Exception as e:
+        logger.error(f"Error building lineage graph: {e}", exc_info=True)
+        abort(400, description="The lineage graph cannot be computed because the artifact metadata is missing or malformed.")
+    
+    # Ensure graph has the correct structure
+    if not isinstance(graph, dict) or "nodes" not in graph or "edges" not in graph:
+        abort(400, description="The lineage graph cannot be computed because the artifact metadata is missing or malformed.")
     
     return jsonify(graph), 200
 
