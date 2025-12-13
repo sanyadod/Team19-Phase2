@@ -109,23 +109,20 @@ def safe_regex_match(pattern: str, text: str, timeout: int = REGEX_TIMEOUT_SECON
 
 def search_artifacts_internal(regex_str: str, offset: int = 0):
 
-    # ✅ 3. Validate regex syntax
     try:
         re.compile(regex_str, re.IGNORECASE)
     except re.error as e:
         abort(400, description=f"Invalid regex pattern: {str(e)}")
 
-    # ✅ 4. Scan DynamoDB
+
     response = META_TABLE.scan()
     all_items = response.get("Items", [])
     while "LastEvaluatedKey" in response:
         response = META_TABLE.scan(ExclusiveStartKey=response["LastEvaluatedKey"])
         all_items.extend(response.get("Items", []))
-
-            # ✅ 5. Try matching — DO NOT abort if no matches
-    results = []
-        # ✅ 5. Try matching — DO NOT abort if no matches
-    results = []
+        
+ 
+        results = []
     for item in all_items:
         # Search across filename, type, and source_url
         searchable = " ".join([
@@ -133,9 +130,6 @@ def search_artifacts_internal(regex_str: str, offset: int = 0):
             str(item.get('artifact_type', '') or ''),
             str(item.get('source_url', '') or '')
         ])
-
-        try:
-            if safe_regex_match(regex_str, searchable):
 
         try:
             if safe_regex_match(regex_str, searchable):
@@ -156,7 +150,6 @@ def search_artifacts_internal(regex_str: str, offset: int = 0):
         except ValueError as e:
             abort(400, description=str(e))
 
-    # ✅ 6. Deduplicate
     seen = set()
     unique_results = []
     for r in results:
@@ -164,19 +157,19 @@ def search_artifacts_internal(regex_str: str, offset: int = 0):
             seen.add(r["id"])
             unique_results.append(r)
 
-    # ✅ 7. Pagination (EMPTY LIST IS OK)
+
     total = len(unique_results)
     end_idx = min(offset + MAX_RESULTS_PER_PAGE, total)
     paginated_results = unique_results[offset:end_idx]
 
     next_offset = str(end_idx) if end_idx < total else None
 
-    # ✅ 8. THIS is the line you asked about
+
     response_obj = jsonify(paginated_results)
     if next_offset:
         response_obj.headers.add("offset", next_offset)
 
-    # ✅ MUST ALWAYS REACH HERE — even if paginated_results == []
+
     return response_obj, 200
 
 
