@@ -84,11 +84,22 @@ def _find_artifact_by_id(artifact_id: Any, all_artifacts: List[Dict[str, Any]]) 
     return None
 
 
+def _normalize_id_to_int(id_value: Any) -> int:
+    """Convert ID to integer for OpenAPI schema compliance. Raises ValueError if not convertible."""
+    if isinstance(id_value, int):
+        return id_value
+    if isinstance(id_value, str):
+        return int(id_value)
+    return int(str(id_value))
+
+
 def _build_lineage_graph(start_artifact: Dict[str, Any], artifact_id: Any, all_artifacts: List[Dict[str, Any]]) -> Dict[str, Any]:
     """
     Build a transitive lineage graph starting from the given artifact.
     Recursively includes all ancestors (parents of parents) and descendants (children of children).
-    Treats IDs as opaque values (like upload/download endpoints do).
+    
+    During traversal, treats IDs as opaque (compares as strings).
+    In the response, normalizes all IDs to integers to match OpenAPI schema.
     
     Lineage semantics:
     - If artifact A has parents = [B, C], then B and C are parents of A
@@ -96,28 +107,36 @@ def _build_lineage_graph(start_artifact: Dict[str, Any], artifact_id: Any, all_a
     - So edges are: B -> A, C -> A
     """
     # Track all nodes and edges we've discovered
-    # Use normalized string IDs as keys for comparison, but preserve original ID types
-    nodes: Dict[str, Dict[str, Any]] = {}  # normalized_id -> node data
+    # Use normalized string IDs as keys for comparison during traversal
+    nodes: Dict[str, Dict[str, Any]] = {}  # normalized_id -> node data (with int IDs)
     edges: List[Dict[str, Any]] = []
     visited: Set[str] = set()  # Track visited nodes to avoid cycles
     
     def add_node(node_id: Any, artifact: Dict[str, Any] | None = None) -> None:
-        """Helper to add a node to the graph. Treats ID as opaque."""
+        """Helper to add a node to the graph. Normalizes ID to int for schema compliance."""
         normalized_id = _normalize_id_for_comparison(node_id)
         if normalized_id in nodes:
             return
         
-        # Use original ID type from artifact if available, otherwise use node_id as-is
+        # Get artifact info
         if artifact:
-            artifact_id_value = artifact.get("id", node_id)
-            node_name = artifact.get("filename") or artifact.get("name") or _normalize_id_for_comparison(artifact_id_value)
+            artifact_id_raw = artifact.get("id", node_id)
+            node_name = artifact.get("filename") or artifact.get("name") or _normalize_id_for_comparison(artifact_id_raw)
         else:
-            artifact_id_value = node_id
+            artifact_id_raw = node_id
             node_name = _normalize_id_for_comparison(node_id)
         
+        # Normalize to int for OpenAPI schema compliance
+        try:
+            artifact_id_int = _normalize_id_to_int(artifact_id_raw)
+        except (ValueError, TypeError) as e:
+            logger.warning(f"Could not convert ID to int: {artifact_id_raw}, error: {e}")
+            # Skip this node if we can't convert to int (schema requirement)
+            return
+        
         nodes[normalized_id] = {
-            "artifact_id": artifact_id_value,  # Keep original type (opaque)
-            "name": str(node_name),
+            "artifact_id": artifact_id_int,  # Must be int for OpenAPI schema
+            "name": str(node_name) if node_name else "",
             "source": "config_json"
         }
     
@@ -143,18 +162,21 @@ def _build_lineage_graph(start_artifact: Dict[str, Any], artifact_id: Any, all_a
                     normalized_grandparent_id = _normalize_id_for_comparison(grandparent_id)
                     if normalized_grandparent_id:
                         # Add edge: grandparent -> parent
-                        # Use original ID types from artifacts
-                        grandparent_artifact = _find_artifact_by_id(grandparent_id, all_artifacts)
-                        grandparent_id_value = grandparent_artifact.get("id", grandparent_id) if grandparent_artifact else grandparent_id
-                        parent_id_value = parent_artifact.get("id", parent_id) if parent_artifact else parent_id
-                        
-                        edges.append({
-                            "from_node_artifact_id": grandparent_id_value,  # Keep original type
-                            "to_node_artifact_id": parent_id_value,  # Keep original type
-                            "relationship": "parent"
-                        })
-                        # Recurse up
-                        walk_up(grandparent_id)
+                        # Normalize to int for schema compliance
+                        try:
+                            grandparent_id_int = _normalize_id_to_int(grandparent_id)
+                            parent_id_int = _normalize_id_to_int(parent_id)
+                            
+                            edges.append({
+                                "from_node_artifact_id": grandparent_id_int,
+                                "to_node_artifact_id": parent_id_int,
+                                "relationship": "parent"
+                            })
+                            # Recurse up
+                            walk_up(grandparent_id)
+                        except (ValueError, TypeError):
+                            # Skip edge if IDs can't be converted to int
+                            logger.warning(f"Could not convert IDs to int for edge: {grandparent_id} -> {parent_id}")
     
     def walk_down(child_id: Any) -> None:
         """Recursively walk down the child chain."""
@@ -182,16 +204,21 @@ def _build_lineage_graph(start_artifact: Dict[str, Any], artifact_id: Any, all_a
                 for p in item_parents:
                     if _normalize_id_for_comparison(p) == normalized_child_id_str:
                         # Add edge: child -> grandchild
-                        child_id_value = child_artifact.get("id", child_id) if child_artifact else child_id
-                        item_id_value = item.get("id", item_id)
-                        
-                        edges.append({
-                            "from_node_artifact_id": child_id_value,  # Keep original type
-                            "to_node_artifact_id": item_id_value,  # Keep original type
-                            "relationship": "parent"
-                        })
-                        # Recurse down
-                        walk_down(item_id)
+                        # Normalize to int for schema compliance
+                        try:
+                            child_id_int = _normalize_id_to_int(child_id)
+                            item_id_int = _normalize_id_to_int(item_id)
+                            
+                            edges.append({
+                                "from_node_artifact_id": child_id_int,
+                                "to_node_artifact_id": item_id_int,
+                                "relationship": "parent"
+                            })
+                            # Recurse down
+                            walk_down(item_id)
+                        except (ValueError, TypeError):
+                            # Skip edge if IDs can't be converted to int
+                            logger.warning(f"Could not convert IDs to int for edge: {child_id} -> {item_id}")
                         break
     
     # Start with the artifact itself
@@ -199,8 +226,12 @@ def _build_lineage_graph(start_artifact: Dict[str, Any], artifact_id: Any, all_a
     visited.add(normalized_start_id)
     add_node(artifact_id, start_artifact)
     
-    # Get the actual ID value from start_artifact (keep original type)
-    start_artifact_id = start_artifact.get("id", artifact_id)
+    # Normalize start artifact ID to int for edges
+    try:
+        start_artifact_id_int = _normalize_id_to_int(start_artifact.get("id", artifact_id))
+    except (ValueError, TypeError) as e:
+        logger.error(f"Could not convert start artifact ID to int: {artifact_id}, error: {e}")
+        raise ValueError(f"Start artifact ID cannot be converted to integer: {artifact_id}")
     
     # Walk up: get all ancestors
     parents = start_artifact.get("parents", [])
@@ -208,18 +239,18 @@ def _build_lineage_graph(start_artifact: Dict[str, Any], artifact_id: Any, all_a
         for parent_id in parents:
             normalized_parent_id = _normalize_id_for_comparison(parent_id)
             if normalized_parent_id:
-                # Find parent to get its original ID type
-                parent_artifact = _find_artifact_by_id(parent_id, all_artifacts)
-                parent_id_value = parent_artifact.get("id", parent_id) if parent_artifact else parent_id
-                
                 # Add edge: parent -> start
-                edges.append({
-                    "from_node_artifact_id": parent_id_value,  # Keep original type
-                    "to_node_artifact_id": start_artifact_id,  # Keep original type
-                    "relationship": "parent"
-                })
-                # Recurse up
-                walk_up(parent_id)
+                try:
+                    parent_id_int = _normalize_id_to_int(parent_id)
+                    edges.append({
+                        "from_node_artifact_id": parent_id_int,
+                        "to_node_artifact_id": start_artifact_id_int,
+                        "relationship": "parent"
+                    })
+                    # Recurse up
+                    walk_up(parent_id)
+                except (ValueError, TypeError):
+                    logger.warning(f"Could not convert parent ID to int: {parent_id}")
     
     # Walk down: get all descendants
     for item in all_artifacts:
@@ -232,24 +263,28 @@ def _build_lineage_graph(start_artifact: Dict[str, Any], artifact_id: Any, all_a
             for p in item_parents:
                 if _normalize_id_for_comparison(p) == normalized_start_id:
                     # Add edge: start -> child
-                    child_id_value = item.get("id", item_id)
-                    
-                    edges.append({
-                        "from_node_artifact_id": start_artifact_id,  # Keep original type
-                        "to_node_artifact_id": child_id_value,  # Keep original type
-                        "relationship": "parent"
-                    })
-                    # Recurse down
-                    walk_down(item_id)
+                    try:
+                        item_id_int = _normalize_id_to_int(item_id)
+                        edges.append({
+                            "from_node_artifact_id": start_artifact_id_int,
+                            "to_node_artifact_id": item_id_int,
+                            "relationship": "parent"
+                        })
+                        # Recurse down
+                        walk_down(item_id)
+                    except (ValueError, TypeError):
+                        logger.warning(f"Could not convert child ID to int: {item_id}")
                     break
     
     # Ensure graph consistency: all edges reference existing nodes
-    node_ids = {_normalize_id_for_comparison(n["artifact_id"]) for n in nodes.values()}
+    # Build a set of normalized node IDs for comparison
+    node_ids_normalized = {_normalize_id_for_comparison(n["artifact_id"]) for n in nodes.values()}
     valid_edges = []
     for edge in edges:
-        from_id = _normalize_id_for_comparison(edge["from_node_artifact_id"])
-        to_id = _normalize_id_for_comparison(edge["to_node_artifact_id"])
-        if from_id in node_ids and to_id in node_ids:
+        # Edges already have int IDs, so normalize them for comparison
+        from_id_normalized = _normalize_id_for_comparison(edge["from_node_artifact_id"])
+        to_id_normalized = _normalize_id_for_comparison(edge["to_node_artifact_id"])
+        if from_id_normalized in node_ids_normalized and to_id_normalized in node_ids_normalized:
             valid_edges.append(edge)
         else:
             logger.warning(f"Skipping edge with missing node: {edge}")
@@ -300,9 +335,12 @@ def get_lineage(artifact_type: str, artifact_id: str):
     # Get all artifacts to build the graph (treat IDs as opaque, no normalization)
     all_artifacts = _get_all_artifacts()
     
-    # Build lineage graph (treat IDs as opaque, like download.py does)
+    # Build lineage graph
     try:
         graph = _build_lineage_graph(metadata, artifact_id, all_artifacts)
+    except (ValueError, TypeError) as e:
+        logger.error(f"Error building lineage graph (ID conversion failed): {e}", exc_info=True)
+        abort(400, description="The lineage graph cannot be computed because the artifact metadata is missing or malformed.")
     except Exception as e:
         logger.error(f"Error building lineage graph: {e}", exc_info=True)
         abort(400, description="The lineage graph cannot be computed because the artifact metadata is missing or malformed.")
