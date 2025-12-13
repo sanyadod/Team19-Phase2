@@ -59,20 +59,9 @@ def list_all_artifacts():
 
 @app.route("/artifacts", methods=["POST"])
 def read_artifacts():
-    """POST /artifacts - Query artifacts by ID or name."""
-    try:
-        queries = request.get_json(force=True, silent=True)
-        if queries is None:
-            queries = request.get_json(silent=True)
-    except Exception as e:
-        logger.error("JSON parse failed: %s", e, exc_info=True)
-        abort(400, description="There is missing field(s) in the artifact_query or it is formed improperly, or is invalid.")
-
-    if queries is None:
-        abort(400, description="There is missing field(s) in the artifact_query or it is formed improperly, or is invalid.")
-
+    queries = request.get_json(silent=True)
     if not isinstance(queries, list) or not queries:
-        abort(400, description="There is missing field(s) in the artifact_query or it is formed improperly, or is invalid.")
+        abort(400, description="Invalid artifact query")
 
     try:
         response = META_TABLE.scan()
@@ -82,22 +71,19 @@ def read_artifacts():
                 ExclusiveStartKey=response["LastEvaluatedKey"]
             )
             items.extend(response.get("Items", []))
-    except ClientError as e:
-        logger.error("DynamoDB scan failed: %s", e, exc_info=True)
+    except ClientError:
         abort(500, description="The artifact storage encountered an error.")
 
     results = []
 
     for query in queries:
-        if not isinstance(query, dict):
-            continue
-            
         q_id = query.get("id")
         q_name = query.get("name")
         q_types = query.get("types", [])
 
         matches = []
 
+        # Scan ALL items - never stop early
         for item in items:
             item_id = item.get("id")
             item_name = item.get("filename")
@@ -107,45 +93,57 @@ def read_artifacts():
             if q_types and item_type not in q_types:
                 continue
 
-            # ID has absolute priority - if ID is provided, match by ID only
+            # ID query: collect ALL matches (should be 0 or 1, but scan everything)
             if q_id is not None:
-                # Compare as strings to handle both int and string IDs
                 if str(item_id) == str(q_id):
-                    matches = [item]
-                    break
+                    matches.append(item)
+                # Continue scanning - don't break early
                 continue
 
-            # If no ID specified, match by name
-            if q_name is None:
+            # Name query: only process if ID was not provided
+            if q_name is None or q_name == "":
                 continue
                 
             if q_name == "*":
                 matches.append(item)
-            elif item_name and q_name == item_name:  # Exact match (not regex)
-                matches.append(item)
+            else:
+                # Try exact match first, then regex if exact doesn't match
+                if q_name == item_name:
+                    matches.append(item)
+                else:
+                    # Fall back to regex matching
+                    try:
+                        if re.fullmatch(q_name, item_name):
+                            matches.append(item)
+                    except re.error:
+                        continue
 
+        # Select the correct match based on spec rules
         if matches:
-            # Sort matches - handle both int and string IDs gracefully
+            # For ID queries, should only be 0 or 1 match
+            # For name queries, select the one with LOWEST numeric ID
             def sort_key(x):
-                item_id = x.get("id")
+                id_val = x.get("id")
                 try:
-                    return (0, int(item_id))  # Int IDs sort first
+                    # Numeric IDs: return as integer for proper numeric sorting
+                    return (0, int(id_val))
                 except (TypeError, ValueError):
-                    return (1, str(item_id))  # String IDs sort after
+                    # String IDs: come after all numeric IDs
+                    return (1, str(id_val))
             
             matches.sort(key=sort_key)
             chosen = matches[0]
             
-            # Convert ID to int if possible (like list_all_artifacts does)
+            # Convert ID to int if possible for consistency
             chosen_id = chosen.get("id")
             try:
-                artifact_id = int(chosen_id)
+                chosen_id = int(chosen_id)
             except (TypeError, ValueError):
-                artifact_id = chosen_id
+                pass
             
             results.append({
                 "name": chosen.get("filename"),
-                "id": artifact_id,
+                "id": chosen_id,
                 "type": chosen.get("artifact_type"),
             })
 
