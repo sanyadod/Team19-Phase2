@@ -96,6 +96,7 @@ def _build_lineage_graph(start_artifact: Dict[str, Any], artifact_id: Any) -> Di
     """
     nodes: List[Dict[str, Any]] = []
     edges: List[Dict[str, Any]] = []
+    seen_ids: Set[str] = set()
     
     # Get the artifact's ID (treat as opaque string)
     artifact_id_value = start_artifact.get("id", artifact_id)
@@ -108,6 +109,7 @@ def _build_lineage_graph(start_artifact: Dict[str, Any], artifact_id: Any) -> Di
         "name": str(artifact_name),
         "source": "config_json"
     })
+    seen_ids.add(artifact_id_str)
     
     # If no parents field, return single-node graph with empty edges
     if "parents" not in start_artifact:
@@ -116,56 +118,54 @@ def _build_lineage_graph(start_artifact: Dict[str, Any], artifact_id: Any) -> Di
             "edges": edges
         }
     
-    # Parents must be a list
+    # Parents must be a list - return 400 if malformed
     parents = start_artifact.get("parents")
     if not isinstance(parents, list):
-        # Malformed parents field - return single-node graph
-        return {
-            "nodes": nodes,
-            "edges": edges
-        }
+        abort(400, description="The lineage graph cannot be computed because the artifact metadata is missing or malformed.")
     
-    # Process each parent in the parents list
-    for parent in parents:
-        # Handle two possible parent formats:
-        # 1. Simple: parent is just an ID (string or number)
-        # 2. Structured: parent is an object with artifact_id, name, relationship
+    # Process each parent in the parents list (baseline: parents are IDs only, not dicts)
+    for parent_id in parents:
+        # Baseline only accepts ID strings/numbers, not dicts
+        if isinstance(parent_id, dict):
+            abort(400, description="The lineage graph cannot be computed because the artifact metadata is missing or malformed.")
         
-        if isinstance(parent, dict):
-            # Structured format: { artifact_id, name, relationship }
-            parent_artifact_id = parent.get("artifact_id") or parent.get("id")
-            parent_name = parent.get("name")
-            parent_relationship = parent.get("relationship", "base_model")
-        else:
-            # Simple format: parent is just an ID
-            parent_artifact_id = parent
-            parent_name = None
-            parent_relationship = "base_model"
-        
-        if not parent_artifact_id:
+        if not parent_id:
             continue
         
-        parent_artifact_id_str = str(parent_artifact_id)
+        parent_artifact_id_str = str(parent_id)
+        
+        # Skip if duplicate (already seen)
+        if parent_artifact_id_str in seen_ids:
+            continue
+        
+        # Skip if parent ID equals artifact ID (self-reference)
+        if parent_artifact_id_str == artifact_id_str:
+            continue
+        
+        # Try to get parent name from DynamoDB
+        parent_name = None
+        try:
+            parent_resp = META_TABLE.get_item(Key={"id": parent_artifact_id_str})
+            parent_item = parent_resp.get("Item")
+            if parent_item:
+                parent_name = parent_item.get("filename") or parent_item.get("name")
+        except ClientError:
+            # If lookup fails, we'll use the ID as the name
+            pass
         
         # Add parent node
-        if parent_name:
-            nodes.append({
-                "artifact_id": parent_artifact_id_str,
-                "name": str(parent_name),
-                "source": "config_json"
-            })
-        else:
-            nodes.append({
-                "artifact_id": parent_artifact_id_str,
-                "name": parent_artifact_id_str,  # Use ID as name if no name provided
-                "source": "config_json"
-            })
+        nodes.append({
+            "artifact_id": parent_artifact_id_str,
+            "name": str(parent_name) if parent_name else parent_artifact_id_str,
+            "source": "config_json"
+        })
+        seen_ids.add(parent_artifact_id_str)
         
-        # Add edge: parent -> artifact
+        # Add edge: parent -> artifact (always use "base_model" for baseline)
         edges.append({
             "from_node_artifact_id": parent_artifact_id_str,
             "to_node_artifact_id": artifact_id_str,
-            "relationship": str(parent_relationship)
+            "relationship": "base_model"  # Always "base_model" for baseline
         })
     
     return {
@@ -178,7 +178,7 @@ def _build_lineage_graph(start_artifact: Dict[str, Any], artifact_id: Any) -> Di
 def get_lineage(artifact_type: str, artifact_id: str):
     """
     GET /artifact/<artifact_type>/<artifact_id>/lineage
-    Get the lineage graph for an artifact, including its parents and children.
+    Get the lineage graph for an artifact, including its direct parents.
     """
     # Require authentication
     _require_auth()
