@@ -10,51 +10,6 @@ AWS_REGION = "us-east-1"
 DYNAMODB = boto3.resource("dynamodb", region_name=AWS_REGION)
 META_TABLE = DYNAMODB.Table("artifact")
 
-MAX_RESULTS = 1000
-PAGE_SIZE = 100
-
-
-@app.route("/artifacts", methods=["GET"])
-def list_all_artifacts():
-    offset_str = request.args.get("offset")
-    offset = int(offset_str) if offset_str and offset_str.isdigit() else 0
-
-    try:
-        response = META_TABLE.scan()
-        items = response.get("Items", [])
-        while "LastEvaluatedKey" in response:
-            response = META_TABLE.scan(
-                ExclusiveStartKey=response["LastEvaluatedKey"]
-            )
-            items.extend(response.get("Items", []))
-    except ClientError:
-        abort(500, description="The artifact storage encountered an error.")
-
-    results = []
-    for item in items:
-        try:
-            artifact_id = int(item.get("id"))
-        except (TypeError, ValueError):
-            artifact_id = item.get("id")
-
-        results.append({
-            "name": item.get("filename"),
-            "id": artifact_id,
-            "type": item.get("artifact_type"),
-        })
-
-    if len(results) > MAX_RESULTS:
-        abort(413, description="Too many artifacts returned.")
-
-    end_idx = min(offset + PAGE_SIZE, len(results))
-    page = results[offset:end_idx]
-
-    resp = jsonify(page)
-    if end_idx < len(results):
-        resp.headers.add("offset", str(end_idx))
-
-    return resp, 200
-
 
 @app.route("/artifacts", methods=["POST"])
 def read_artifacts():
@@ -112,13 +67,21 @@ def read_artifacts():
 
         # ---------- Step 4: ID lookup (highest priority) ----------
         if q_id is not None:
-            match = None
+            # Scan ALL items - never stop early
+            id_matches = []
             for a in candidates:
                 if str(a.get("id")) == str(q_id):
-                    match = a
-                    break
-
-            if match:
+                    id_matches.append(a)
+            
+            # If multiple matches (shouldn't happen, but handle it), select lowest numeric ID
+            if id_matches:
+                def id_as_int(x):
+                    try:
+                        return int(x.get("id"))
+                    except Exception:
+                        return float("inf")
+                
+                match = min(id_matches, key=id_as_int)
                 results.append({
                     "id": match.get("id"),
                     "name": match.get("filename"),
@@ -140,16 +103,18 @@ def read_artifacts():
                     })
                 continue
 
-            # ----- Exact name match -----
-            name_matches = [
-                a for a in candidates
-                if a.get("filename") == q_name
-            ]
+            # ----- Exact name match (case-sensitive, no trimming) -----
+            name_matches = []
+            for a in candidates:
+                artifact_filename = a.get("filename")
+                # Exact string match - no normalization, no trimming
+                if artifact_filename is not None and str(artifact_filename) == str(q_name):
+                    name_matches.append(a)
 
             if not name_matches:
                 continue
 
-            # Deterministic selection: LOWEST numeric ID
+            # Return ONLY ONE result: select the one with LOWEST numeric ID
             def id_as_int(x):
                 try:
                     return int(x.get("id"))
@@ -158,6 +123,7 @@ def read_artifacts():
 
             chosen = min(name_matches, key=id_as_int)
 
+            # Append exactly ONE result for this query
             results.append({
                 "id": chosen.get("id"),
                 "name": chosen.get("filename"),
