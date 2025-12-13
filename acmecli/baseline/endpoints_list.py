@@ -88,30 +88,26 @@ def read_artifacts():
             item_name = item.get("filename")
             item_type = item.get("artifact_type")
 
-            # Type filter
             if q_types and item_type not in q_types:
                 continue
 
-            # ID has highest priority
+            # ID has absolute priority
             if q_id is not None:
                 if str(item_id) == str(q_id):
                     matches = [item]
                     break
                 continue
 
-            # Name match (regex semantics)
-            if q_name is not None:
-                if q_name == "*":
-                    matches.append(item)
-                else:
-                    try:
-                        if re.fullmatch(q_name, item_name):
-                            matches.append(item)
-                    except re.error:
-                        continue
+            if q_name == "*":
+                matches.append(item)
+            else:
+                try:
+                    if re.fullmatch(q_name, item_name):
+                        matches.append(item)
+                except re.error:
+                    continue
 
         if matches:
-            # Select lowest numeric ID
             matches.sort(key=lambda x: int(x["id"]))
             chosen = matches[0]
             results.append({
@@ -121,6 +117,7 @@ def read_artifacts():
             })
 
     return jsonify(results), 200
+
 
 
 
