@@ -42,11 +42,26 @@ def health():
     return "", 200
 
         
+"""
+# Register all routes from download.py
+for rule in download_module.app.url_map.iter_rules():
+    # Skip the static route
+    if rule.endpoint != 'static':
+        app.add_url_rule(
+            rule.rule,
+            endpoint=f"download_{rule.endpoint}",  # Prefix to avoid conflicts
+            view_func=download_module.app.view_functions[rule.endpoint],
+            methods=rule.methods
+        )
+        """
 
 # Register all routes from download.py
 for rule in download_module.app.url_map.iter_rules():
     # Skip the static route
     if rule.endpoint != 'static':
+        # Skip POST /artifacts route - endpoints_list.py handles it
+        if rule.rule == '/artifacts' and 'POST' in rule.methods:
+            continue
         app.add_url_rule(
             rule.rule,
             endpoint=f"download_{rule.endpoint}",  # Prefix to avoid conflicts
