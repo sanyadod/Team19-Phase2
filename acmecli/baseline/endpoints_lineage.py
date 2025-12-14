@@ -295,89 +295,109 @@ def _choose_parent_ids(item: Dict[str, Any], models: Dict[str, Dict[str, Any]],
                        name_to_id: Dict[str, str], config_cache: Dict[str, Optional[Dict[str, Any]]]) -> List[str]:
     """
     Determine parent model IDs for a given model item.
-    First checks DynamoDB 'parents' field, then falls back to config.json from S3 zip (name -> id).
+    DynamoDB 'parents' field is the authoritative source. S3 config.json is a best-effort fallback.
     Returns only parents that exist in `models`.
     """
     model_id = str(item.get("id", ""))
     
-    # First, check DynamoDB 'parents' field
-    parents_from_db = _as_list(item.get("parents"))
+    # DynamoDB 'parents' field is the authoritative source
+    raw_parents = item.get("parents")
+    parents_from_db = _as_list(raw_parents)
+    
     if parents_from_db:
+        # Log raw value and parsed list
+        logger.warning("Model %s: Raw parents value from DynamoDB: %s", model_id, raw_parents)
+        logger.warning("Model %s: Parsed parent ID list: %s", model_id, parents_from_db)
+        
+        # Filter to only include parent IDs that exist in models registry
         valid_parents = [pid for pid in parents_from_db if pid in models]
+        
         if valid_parents:
-            logger.warning("Model %s: Found %d parent(s) from DynamoDB 'parents' field: %s", 
-                         model_id, len(valid_parents), valid_parents)
+            logger.warning("Model %s: Using parents from DynamoDB: %s (filtered from %d to %d valid)", 
+                         model_id, valid_parents, len(parents_from_db), len(valid_parents))
             return valid_parents
+        else:
+            logger.warning("Model %s: DynamoDB parents field has %d entries, but none exist in models registry", 
+                         model_id, len(parents_from_db))
+            if len(parents_from_db) > 0:
+                logger.warning("Model %s: Invalid parent IDs (not in registry): %s", 
+                             model_id, [pid for pid in parents_from_db if pid not in models])
     
-    # Fallback: Load config.json from S3 zip
-    if model_id not in config_cache:
-        config_cache[model_id] = load_config_json_from_s3(item)
-    
-    cfg = config_cache[model_id]
-    if cfg is None:
-        logger.warning("Model %s: config.json missing in zip", model_id)
-        return []
-    
-    # Extract parent name from config.json
-    pname, keys_checked = _extract_parent_name_from_config(cfg)
-    
-    if not pname:
-        logger.warning("Model %s: config.json present but no parent key found (checked keys: %s)", 
-                      model_id, keys_checked)
-        return []
-    
-    # Try multiple lookup strategies
-    pid = None
-    
-    # Strategy 1: Exact lookup
-    pid = name_to_id.get(pname)
-    if pid and pid in models:
-        logger.warning("Model %s: Parent successfully resolved: '%s' -> %s (exact match)", 
-                      model_id, pname, pid)
-        return [pid]
-    
-    # Strategy 2: Lowercase lookup
-    pid = name_to_id.get(pname.lower())
-    if pid and pid in models:
-        logger.warning("Model %s: Parent successfully resolved: '%s' -> %s (lowercase match)", 
-                      model_id, pname, pid)
-        return [pid]
-    
-    # Strategy 3: Stem lookup (for cases where pname includes .zip or extension)
-    stem = _get_filename_stem(pname)
-    if stem and stem != pname:
-        pid = name_to_id.get(stem)
+    # Best-effort fallback: Try S3 config.json (non-blocking)
+    # This is optional and should not prevent edge creation if DynamoDB parents exist
+    try:
+        if model_id not in config_cache:
+            config_cache[model_id] = load_config_json_from_s3(item)
+        
+        cfg = config_cache[model_id]
+        if cfg is None:
+            # S3 fallback failed, but that's okay - DynamoDB is authoritative
+            return []
+        
+        # Extract parent name from config.json
+        pname, keys_checked = _extract_parent_name_from_config(cfg)
+        
+        if not pname:
+            # No parent key found in config.json, but that's okay
+            return []
+        
+        # Try multiple lookup strategies for config.json parent name
+        pid = None
+        
+        # Strategy 1: Exact lookup
+        pid = name_to_id.get(pname)
         if pid and pid in models:
-            logger.warning("Model %s: Parent successfully resolved: '%s' -> %s (stem match: '%s')", 
-                          model_id, pname, pid, stem)
+            logger.warning("Model %s: Parent resolved from config.json: '%s' -> %s (exact match)", 
+                          model_id, pname, pid)
             return [pid]
         
-        # Try lowercase stem
-        pid = name_to_id.get(stem.lower())
+        # Strategy 2: Lowercase lookup
+        pid = name_to_id.get(pname.lower())
         if pid and pid in models:
-            logger.warning("Model %s: Parent successfully resolved: '%s' -> %s (lowercase stem match: '%s')", 
-                          model_id, pname, pid, stem)
-            return [pid]
-    
-    # Strategy 4: HuggingFace-style tail extraction
-    hf_tail = _extract_hf_model_tail(pname)
-    if hf_tail:
-        pid = name_to_id.get(hf_tail)
-        if pid and pid in models:
-            logger.warning("Model %s: Parent successfully resolved: '%s' -> %s (HF tail match: '%s')", 
-                          model_id, pname, pid, hf_tail)
+            logger.warning("Model %s: Parent resolved from config.json: '%s' -> %s (lowercase match)", 
+                          model_id, pname, pid)
             return [pid]
         
-        pid = name_to_id.get(hf_tail.lower())
-        if pid and pid in models:
-            logger.warning("Model %s: Parent successfully resolved: '%s' -> %s (lowercase HF tail match: '%s')", 
-                          model_id, pname, pid, hf_tail)
-            return [pid]
+        # Strategy 3: Stem lookup (for cases where pname includes .zip or extension)
+        stem = _get_filename_stem(pname)
+        if stem and stem != pname:
+            pid = name_to_id.get(stem)
+            if pid and pid in models:
+                logger.warning("Model %s: Parent resolved from config.json: '%s' -> %s (stem match: '%s')", 
+                              model_id, pname, pid, stem)
+                return [pid]
+            
+            # Try lowercase stem
+            pid = name_to_id.get(stem.lower())
+            if pid and pid in models:
+                logger.warning("Model %s: Parent resolved from config.json: '%s' -> %s (lowercase stem match: '%s')", 
+                              model_id, pname, pid, stem)
+                return [pid]
+        
+        # Strategy 4: HuggingFace-style tail extraction
+        hf_tail = _extract_hf_model_tail(pname)
+        if hf_tail:
+            pid = name_to_id.get(hf_tail)
+            if pid and pid in models:
+                logger.warning("Model %s: Parent resolved from config.json: '%s' -> %s (HF tail match: '%s')", 
+                              model_id, pname, pid, hf_tail)
+                return [pid]
+            
+            pid = name_to_id.get(hf_tail.lower())
+            if pid and pid in models:
+                logger.warning("Model %s: Parent resolved from config.json: '%s' -> %s (lowercase HF tail match: '%s')", 
+                              model_id, pname, pid, hf_tail)
+                return [pid]
+        
+        # Config.json parent name could not be resolved
+        available_keys = sorted(name_to_id.keys())[:10]
+        logger.warning("Model %s: Parent name '%s' from config.json not found in registry. "
+                      "Available keys (first 10): %s", model_id, pname, available_keys)
     
-    # All strategies failed - log diagnostic information
-    available_keys = sorted(name_to_id.keys())[:10]
-    logger.warning("Model %s: Parent name '%s' not found in registry. Tried: exact, lowercase, stem, HF tail. "
-                  "Available keys (first 10): %s", model_id, pname, available_keys)
+    except Exception as e:
+        # S3/config.json errors should not block lineage if DynamoDB parents exist
+        # Log but don't fail
+        logger.warning("Model %s: Error in S3 config.json fallback (non-blocking): %s", model_id, e)
     
     return []
 
