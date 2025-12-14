@@ -67,14 +67,14 @@ def _scan_all_models() -> Dict[str, Dict[str, Any]]:
 def _display_name(item: Dict[str, Any], fallback_id: str) -> str:
     return str(item.get("name") or item.get("filename") or fallback_id)
 
-def load_config_json_from_s3(item: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+def load_config_json_from_s3(item: Dict[str, Any], abort_on_error: bool = True) -> Optional[Dict[str, Any]]:
     """
     Load config.json from S3 zip file.
     Reads bucket=item["s3_bucket"] and key=item["s3_key"],
     downloads the zip, finds config.json anywhere in the archive,
     parses it as JSON and returns a dict.
     Returns None if missing/unreadable.
-    On S3/Dynamo errors, aborts with HTTP 500.
+    On S3/Dynamo errors, aborts with HTTP 500 if abort_on_error=True, otherwise returns None.
     """
     model_id = str(item.get("id", "unknown"))
     bucket = item.get("s3_bucket")
@@ -107,12 +107,13 @@ def load_config_json_from_s3(item: Dict[str, Any]) -> Optional[Dict[str, Any]]:
                     break
             
             if not config_path:
-                logger.warning("Model %s: Missing config.json in zip s3://%s/%s", model_id, bucket, key)
+                logger.debug("Model %s: Missing config.json in zip s3://%s/%s", model_id, bucket, key)
                 return None
             
             try:
                 config_content = zf.read(config_path)
                 config_dict = json.loads(config_content.decode("utf-8"))
+                logger.debug("Model %s: Successfully loaded config.json from s3://%s/%s", model_id, bucket, key)
                 return config_dict
             except json.JSONDecodeError as e:
                 logger.warning("Model %s: JSON decode error in config.json from %s in zip %s: %s (line %d, col %d)", 
@@ -128,7 +129,9 @@ def load_config_json_from_s3(item: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         error_msg = e.response.get('Error', {}).get('Message', str(e))
         logger.error("Model %s: S3 get_object failed: bucket=%s, key=%s, error_code=%s, error=%s", 
                     model_id, bucket, key, error_code, error_msg, exc_info=True)
-        abort(500, description="The artifact storage encountered an error.")
+        if abort_on_error:
+            abort(500, description="The artifact storage encountered an error.")
+        return None
     except zipfile.BadZipFile as e:
         logger.warning("Model %s: File s3://%s/%s is not a valid zip file: %s", model_id, bucket, key, e)
         return None
@@ -138,7 +141,9 @@ def load_config_json_from_s3(item: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     except Exception as e:
         logger.error("Model %s: Unexpected error loading config.json: bucket=%s, key=%s, error=%s", 
                     model_id, bucket, key, e, exc_info=True)
-        abort(500, description="The artifact storage encountered an error.")
+        if abort_on_error:
+            abort(500, description="The artifact storage encountered an error.")
+        return None
 
 def _extract_parent_name_from_config(cfg: Dict[str, Any]) -> Tuple[Optional[str], List[str]]:
     """
@@ -286,10 +291,12 @@ def _as_list(x: Any) -> List[str]:
         return [normalized] if normalized else []
     return []
 
-def _choose_parent_ids(item: Dict[str, Any], models: Dict[str, Dict[str, Any]]) -> List[str]:
+def _choose_parent_ids(item: Dict[str, Any], models: Dict[str, Dict[str, Any]], 
+                       name_to_id_map: Optional[Dict[str, str]] = None) -> List[str]:
     """
     Determine parent model IDs for a given model item.
     DynamoDB 'parents' field is the authoritative source.
+    Falls back to extracting parent from config.json if parents field is missing.
     Returns only parents that exist in `models`.
     """
     model_id = _normalize_id(item.get("id", ""))
@@ -303,37 +310,64 @@ def _choose_parent_ids(item: Dict[str, Any], models: Dict[str, Dict[str, Any]]) 
     
     parents_from_db = _as_list(raw_parents)
     
-    if not parents_from_db:
-        # No parents field or empty list - return empty (valid case)
-        return []
+    if parents_from_db:
+        # Filter to only include parent IDs that exist in models registry
+        # Note: _as_list already normalizes IDs using _normalize_id
+        valid_parents = [pid for pid in parents_from_db if pid in models]
+        
+        if valid_parents:
+            logger.info("Model %s: Using parents from DynamoDB: %s", model_id, valid_parents)
+            return valid_parents
+        else:
+            # Parents field exists but none are valid
+            if len(parents_from_db) > 0:
+                # Log available model IDs for debugging
+                sample_model_ids = list(models.keys())[:5] if models else []
+                logger.warning("Model %s: DynamoDB parents field has %d entries, but none exist in models registry. Invalid IDs: %s (sample model IDs: %s)", 
+                             model_id, len(parents_from_db), parents_from_db, sample_model_ids)
+            return []
     
-    # Filter to only include parent IDs that exist in models registry
-    # Note: _as_list already normalizes IDs using _normalize_id
-    valid_parents = [pid for pid in parents_from_db if pid in models]
+    # Fallback: Try to extract parent from config.json if parents field is missing
+    if name_to_id_map is None:
+        name_to_id_map = _build_name_to_id_map(models)
     
-    if valid_parents:
-        logger.info("Model %s: Using parents from DynamoDB: %s", model_id, valid_parents)
-        return valid_parents
+    # Try to load config.json from S3 (don't abort on errors, just return None)
+    config = load_config_json_from_s3(item, abort_on_error=False)
+    if config:
+        parent_name, keys_checked = _extract_parent_name_from_config(config)
+        if parent_name:
+            logger.info("Model %s: Extracted parent name '%s' from config.json (checked keys: %s)", 
+                       model_id, parent_name, keys_checked)
+            
+            # Try to find parent ID using name mapping
+            parent_id = name_to_id_map.get(parent_name) or name_to_id_map.get(parent_name.lower())
+            
+            if parent_id and parent_id in models:
+                logger.info("Model %s: Mapped parent name '%s' to ID '%s'", model_id, parent_name, parent_id)
+                return [parent_id]
+            else:
+                logger.debug("Model %s: Parent name '%s' from config.json not found in models registry", 
+                           model_id, parent_name)
     else:
-        # Parents field exists but none are valid
-        if len(parents_from_db) > 0:
-            # Log available model IDs for debugging
-            sample_model_ids = list(models.keys())[:5] if models else []
-            logger.warning("Model %s: DynamoDB parents field has %d entries, but none exist in models registry. Invalid IDs: %s (sample model IDs: %s)", 
-                         model_id, len(parents_from_db), parents_from_db, sample_model_ids)
-        return []
+        logger.debug("Model %s: No config.json found in S3 or failed to load", model_id)
+    
+    # No parents found
+    return []
 
 def _build_parent_child_maps_lazy(models: Dict[str, Dict[str, Any]], 
                                    start_id: str, 
                                    max_depth: int = 10) -> Tuple[Dict[str, List[str]], Dict[str, List[str]]]:
     """
-    Build parent/child maps using DynamoDB parents field.
+    Build parent/child maps using DynamoDB parents field, with fallback to config.json.
     Uses BFS starting from start_id for ancestors, then discovers descendants.
     parents_map[child_id] = [parent_ids]
     children_map[parent_id] = [child_ids]
     """
     parents_map: Dict[str, List[str]] = {}
     children_map: Dict[str, List[str]] = {}
+    
+    # Build name-to-ID mapping once for config.json fallback
+    name_to_id_map = _build_name_to_id_map(models)
     
     # Debug: Count how many models have parents field
     models_with_parents_field = sum(1 for item in models.values() if item.get("parents") is not None)
@@ -358,7 +392,7 @@ def _build_parent_child_maps_lazy(models: Dict[str, Dict[str, Any]],
         item = models[current_id]
         
         try:
-            parent_ids = _choose_parent_ids(item, models)
+            parent_ids = _choose_parent_ids(item, models, name_to_id_map)
         except Exception as e:
             logger.error("Error choosing parent IDs for %s: %s", current_id, e, exc_info=True)
             continue
@@ -387,7 +421,7 @@ def _build_parent_child_maps_lazy(models: Dict[str, Dict[str, Any]],
                 continue
             
             try:
-                parent_ids = _choose_parent_ids(item, models)
+                parent_ids = _choose_parent_ids(item, models, name_to_id_map)
                 
                 if current_id in parent_ids:
                     if child_id not in parents_map:
