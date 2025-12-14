@@ -19,6 +19,21 @@ import streamlit as st
 # -----------------------------
 st.set_page_config(page_title="Artifact Registry", page_icon="📦", layout="centered")
 
+# Inject accessibility improvements via custom CSS/HTML
+st.markdown("""
+<style>
+    /* Ensure proper focus indicators for keyboard navigation */
+    button:focus, input:focus, select:focus, textarea:focus {
+        outline: 2px solid #0066cc;
+        outline-offset: 2px;
+    }
+    /* Improve color contrast for better readability */
+    .stMarkdown, .stText {
+        color: #262730;
+    }
+</style>
+""", unsafe_allow_html=True)
+
 DEFAULT_BACKEND_URL = (
     st.secrets.get("BACKEND_URL", None)
     if hasattr(st, "secrets")
@@ -76,8 +91,7 @@ def request_json(method: str, url: str, *, timeout: int = 15, **kwargs) -> Dict[
 # -----------------------------
 def sidebar_backend_url() -> str:
     st.sidebar.markdown("### Settings")
-    backend = st.sidebar.text_input("Backend URL", value=DEFAULT_BACKEND_URL)
-    st.sidebar.caption("Tip: Keep Home lightweight for Lighthouse.")
+    backend = st.sidebar.text_input("Backend URL", value=DEFAULT_BACKEND_URL, key="backend_url_input")
     return backend.rstrip("/")
 
 
@@ -87,6 +101,7 @@ def sidebar_navigation() -> str:
         "Tools",
         ["Home", "Upload", "Download", "Search", "Lineage", "Cost", "License", "Rate", "Reset"],
         index=0,
+        key="main_navigation",
     )
 
 
@@ -104,7 +119,7 @@ def show_result(result: Dict[str, Any], *, title: str = "Result") -> None:
     else:
         st.code(_small_preview(result), language="json")
         # Optional expand for debugging without hurting default performance too much:
-        with st.expander("Expand full response (debug)"):
+        with st.expander("Expand full response (debug)", expanded=False):
             st.json(result)
 
 
@@ -114,18 +129,18 @@ def show_result(result: Dict[str, Any], *, title: str = "Result") -> None:
 def render_home() -> None:
     page_header("Artifact Registry", "Upload, download, and manage artifacts.")
     st.write("Use the sidebar to open a tool.")
-    st.info("This UI is optimized for Lighthouse Performance (minimal work on first load).")
+    st.info("This registry allows you to manage ML models, datasets, and code artifacts. Store, search, and track lineage for all your machine learning artifacts in one centralized location.")
 
 
 def render_upload(backend: str) -> None:
     page_header("Upload Artifact", "Upload a ZIP artifact to the registry (backend handles storage).")
 
-    artifact_type = st.selectbox("Artifact Category", VALID_TYPES, index=0)
+    artifact_type = st.selectbox("Artifact Category", VALID_TYPES, index=0, key="upload_artifact_type")
 
-    uploaded = st.file_uploader("Choose a ZIP file", type=["zip"])
+    uploaded = st.file_uploader("Choose a ZIP file", type=["zip"], key="upload_file_input")
     st.caption("Note: Only uploads when you click the button (no background calls).")
 
-    if st.button("Upload Artifact"):
+    if st.button("Upload Artifact", key="upload_button"):
         if not uploaded:
             st.error("Please choose a ZIP file to upload.")
             return
@@ -144,10 +159,10 @@ def render_upload(backend: str) -> None:
 def render_download(backend: str) -> None:
     page_header("Download Artifact", "Download an artifact by type and ID.")
 
-    artifact_type = st.selectbox("Artifact type", VALID_TYPES, index=0)
-    artifact_id = st.text_input("Artifact ID", value="")
+    artifact_type = st.selectbox("Artifact type", VALID_TYPES, index=0, key="download_artifact_type")
+    artifact_id = st.text_input("Artifact ID", value="", key="download_artifact_id")
 
-    if st.button("Download"):
+    if st.button("Download", key="download_button"):
         if not artifact_id.strip():
             st.error("Please enter an Artifact ID.")
             return
@@ -165,7 +180,8 @@ def render_download(backend: str) -> None:
         url = result.get("url") or result.get("download_url")
         if isinstance(url, str) and url.startswith("http"):
             st.success("Download ready.")
-            st.link_button("Open download", url)
+            # Use markdown link with proper accessibility attributes
+            st.markdown(f'<a href="{url}" target="_blank" rel="noopener noreferrer" aria-label="Open download link in new tab">Open download</a>', unsafe_allow_html=True)
             if not ENABLE_LARGE_PREVIEWS:
                 st.caption("Response details truncated for performance.")
         else:
@@ -175,12 +191,12 @@ def render_download(backend: str) -> None:
 def render_search(backend: str) -> None:
     page_header("Search Artifacts", "Search artifacts using regex or filters (backend).")
 
-    method = st.radio("Search Method", ["GET", "POST"], horizontal=True)
-    pattern = st.text_input("Regex Pattern", value=".*")
+    method = st.radio("Search Method", ["GET", "POST"], horizontal=True, key="search_method")
+    pattern = st.text_input("Regex Pattern", value=".*", key="search_pattern")
 
-    artifact_type = st.selectbox("Artifact type (optional)", ["(any)"] + VALID_TYPES, index=0)
+    artifact_type = st.selectbox("Artifact type (optional)", ["(any)"] + VALID_TYPES, index=0, key="search_artifact_type")
 
-    if st.button("Run Search"):
+    if st.button("Run Search", key="search_button"):
         payload: Dict[str, Any] = {"pattern": pattern}
         if artifact_type != "(any)":
             payload["type"] = artifact_type
@@ -197,9 +213,9 @@ def render_search(backend: str) -> None:
 def render_lineage(backend: str) -> None:
     page_header("Model Lineage", "Fetch lineage info for a model ID.")
 
-    model_id = st.text_input("Model ID", value="")
+    model_id = st.text_input("Model ID", value="", key="lineage_model_id")
 
-    if st.button("Get Lineage"):
+    if st.button("Get Lineage", key="lineage_button"):
         if not model_id.strip():
             st.error("Please enter a Model ID.")
             return
@@ -218,10 +234,10 @@ def render_lineage(backend: str) -> None:
 def render_cost(backend: str) -> None:
     page_header("Cost Calculator", "Estimate cost for an artifact (backend).")
 
-    artifact_type = st.selectbox("Artifact type", VALID_TYPES, index=0)
-    artifact_id = st.text_input("Artifact ID", value="")
+    artifact_type = st.selectbox("Artifact type", VALID_TYPES, index=0, key="cost_artifact_type")
+    artifact_id = st.text_input("Artifact ID", value="", key="cost_artifact_id")
 
-    if st.button("Calculate Cost"):
+    if st.button("Calculate Cost", key="cost_button"):
         if not artifact_id.strip():
             st.error("Please enter an Artifact ID.")
             return
@@ -240,9 +256,9 @@ def render_cost(backend: str) -> None:
 def render_license(backend: str) -> None:
     page_header("License Check", "Check license compatibility or artifact license (backend).")
 
-    artifact_id = st.text_input("Artifact ID", value="")
+    artifact_id = st.text_input("Artifact ID", value="", key="license_artifact_id")
 
-    if st.button("Check License"):
+    if st.button("Check License", key="license_button"):
         if not artifact_id.strip():
             st.error("Please enter an Artifact ID.")
             return
@@ -256,10 +272,10 @@ def render_license(backend: str) -> None:
 def render_rate(backend: str) -> None:
     page_header("Rate Model", "Submit a rating for a model (backend).")
 
-    model_id = st.text_input("Model ID", value="")
-    rating = st.slider("Rating", min_value=1, max_value=5, value=5)
+    model_id = st.text_input("Model ID", value="", key="rate_model_id")
+    rating = st.slider("Rating", min_value=1, max_value=5, value=5, key="rate_slider")
 
-    if st.button("Submit Rating"):
+    if st.button("Submit Rating", key="rate_button"):
         if not model_id.strip():
             st.error("Please enter a Model ID.")
             return
@@ -280,8 +296,8 @@ def render_reset(backend: str) -> None:
 
     st.warning("This will delete registry data. Use carefully.")
 
-    confirm = st.checkbox("I understand this action is destructive.")
-    if st.button("Reset"):
+    confirm = st.checkbox("I understand this action is destructive.", key="reset_confirm")
+    if st.button("Reset", key="reset_button"):
         if not confirm:
             st.error("Please confirm the warning checkbox first.")
             return
