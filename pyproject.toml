@@ -20,7 +20,9 @@ dev = [
   "mypy>=1.10",
   "types-requests",
   "black>=24.0",
-  "pre-commit>=3.5"
+  "pre-commit>=3.5",
+  "selenium>=4.15.0",
+  "webdriver-manager>=4.0.0"
 ]
 
 # ---- Formatting / Linting config ----
@@ -61,3 +63,7 @@ addopts = "-q"
 testpaths = ["tests"]
 pythonpath = ["."]
 import-mode = "importlib"
+markers = [
+    "selenium: marks tests as selenium browser tests (deselect with '-m \"not selenium\"')",
+    "integration: marks tests as integration tests",
+]

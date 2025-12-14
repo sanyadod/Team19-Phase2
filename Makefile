@@ -1,4 +1,4 @@
-.PHONY: fix check test cov type lint fmt
+.PHONY: fix check test cov type lint fmt test-selenium test-ui
 
 fmt:
 	python -m black .
@@ -12,6 +12,11 @@ type:
 
 test:
 	pytest -q
+
+test-selenium:
+	pytest tests/test_streamlit_ui.py -v
+
+test-ui: test-selenium
 
 cov:
 	coverage run -m pytest -q >/dev/null 2>&1 || true; coverage report -m
