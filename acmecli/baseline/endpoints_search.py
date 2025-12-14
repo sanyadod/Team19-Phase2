@@ -103,8 +103,10 @@ def safe_regex_match(pattern: str, text: str, timeout: int = REGEX_TIMEOUT_SECON
             raise value
         return value
     
-    # If we get here, something went wrong
+    # If queue is empty, process completed but didn't put result (shouldn't happen)
+    # Return False (no match)
     return False
+
 
 
 def search_artifacts_internal(regex_str: str, offset: int = 0):
@@ -122,37 +124,41 @@ def search_artifacts_internal(regex_str: str, offset: int = 0):
         response = META_TABLE.scan(ExclusiveStartKey=response["LastEvaluatedKey"])
         all_items.extend(response.get("Items", []))
 
-            # ✅ 5. Try matching — DO NOT abort if no matches
+    # ✅ 5. Try matching — DO NOT abort if no matches
     results = []
     for item in all_items:
-     
-        searchable_parts = []
+        # Get fields to search - check each field individually
+        fields_to_search = [
+            str(item.get('filename', '') or ''),
+            str(item.get('artifact_type', '') or ''),
+            str(item.get('source_url', '') or '')
+        ]
         
-        for key, value in item.items():
-            if isinstance(value, str):
-                searchable_parts.append(value)
-        
-        searchable = " ".join(searchable_parts)
-
-
+        matched = False
         try:
-            if safe_regex_match(regex_str, searchable):
-                # Convert ID to int if possible, otherwise keep as string
-                artifact_id = item.get("id")
-                try:
-                    artifact_id = int(artifact_id)
-                except (TypeError, ValueError):
-                    pass
-                
-                results.append({
-                    "name": item.get("filename", ""),
-                    "id": artifact_id,
-                    "type": item.get("artifact_type", "")
-                })
+            # Check if regex matches ANY of the fields
+            for field_value in fields_to_search:
+                if safe_regex_match(regex_str, field_value):
+                    matched = True
+                    break
         except TimeoutError:
             abort(400, description="Regex pattern caused timeout (potential ReDoS)")
         except ValueError as e:
             abort(400, description=str(e))
+        
+        if matched:
+            # Convert ID to int if possible, otherwise keep as string
+            artifact_id = item.get("id")
+            try:
+                artifact_id = int(artifact_id)
+            except (TypeError, ValueError):
+                pass
+            
+            results.append({
+                "name": item.get("filename", ""),
+                "id": artifact_id,
+                "type": item.get("artifact_type", "")
+            })
 
     # ✅ 6. Deduplicate
     seen = set()
