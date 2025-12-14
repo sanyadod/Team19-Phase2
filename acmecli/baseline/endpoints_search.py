@@ -4,6 +4,7 @@ from botocore.exceptions import ClientError
 import logging
 import re
 import signal
+from multiprocessing import Process, Queue
 
 app = Flask(__name__)
 logger = logging.getLogger(__name__)
@@ -27,145 +28,176 @@ def timeout_handler(signum, frame):
 
 
 def is_safe_regex(pattern: str) -> bool:
-    # Check for nested quantifiers
-    nested_quantifiers = re.compile(r'(\(.*[+*]{1,2}.*\))[+*]')
-    if nested_quantifiers.search(pattern):
-        logger.warning(f"Detected nested quantifiers in pattern: {pattern}")
-        return False
+    """
+    Detect potentially malicious regex patterns that cause ReDoS.
     
-    # Check for extremely long patterns
+    Common ReDoS patterns:
+    - Nested quantifiers: (a+)+
+    - Multiple consecutive quantified groups: (a+)(a+)(a+)
+    - Alternation with overlap: (a|a)*
+    """
+    # Check 1: Pattern too long
     if len(pattern) > 500:
-        logger.warning(f"Pattern too long ({len(pattern)} chars)")
+        logger.warning(f"Pattern too long: {len(pattern)} chars")
         return False
     
-    # Check for excessive alternations
+    # Check 2: Too many alternations
     if pattern.count('|') > 20:
-        logger.warning(f"Too many alternations in pattern")
+        logger.warning("Too many alternations")
+        return False
+    
+    # Check 3: Nested quantifiers like (a+)+ or (a*)*
+    nested_quantifiers = re.compile(r'(\([^)]*[+*?]\))[+*?]')
+    if nested_quantifiers.search(pattern):
+        logger.warning(f"Nested quantifiers detected: {pattern}")
+        return False
+    
+
+    # Check 5: Exponential alternation like (a|a)*
+    exponential_alt = re.compile(r'\(([^)|]+\|)+[^)]+\)[+*]')
+    if exponential_alt.search(pattern):
+        logger.warning(f"Exponential alternation detected: {pattern}")
         return False
     
     return True
 
 
-def safe_regex_match(pattern: str, text: str, timeout: int = REGEX_TIMEOUT_SECONDS) -> bool:
-
-    # Set up timeout signal (Unix-like systems only)
+def _regex_worker(pattern: str, text: str, result_queue: Queue):
+    """Run regex matching in a separate process."""
     try:
-        signal.signal(signal.SIGALRM, timeout_handler)
-        signal.alarm(timeout)
-        
         compiled_pattern = re.compile(pattern, re.IGNORECASE)
         result = compiled_pattern.search(text) is not None
-        
-        signal.alarm(0)  # Cancel alarm
-        return result
-        
-    except AttributeError:
-        # Windows doesn't support SIGALRM, fall back to simple match
-        compiled_pattern = re.compile(pattern, re.IGNORECASE)
-        return compiled_pattern.search(text) is not None
-        
-    except TimeoutError:
-        signal.alarm(0)
-        raise
-        
+        result_queue.put(('success', result))
     except re.error as e:
-        signal.alarm(0)
-        logger.error(f"Invalid regex pattern: {e}")
-        raise ValueError(f"Invalid regex pattern: {e}")
+        result_queue.put(('error', ValueError(f"Invalid regex pattern: {e}")))
+    except Exception as e:
+        result_queue.put(('error', e))
+
+
+def safe_regex_match(pattern: str, text: str, timeout: int = REGEX_TIMEOUT_SECONDS) -> bool:
+    """
+    Perform regex matching with timeout protection.
+    Uses multiprocessing to actually kill slow regex operations.
+    Detects catastrophic backtracking (ReDoS attacks).
+    """
+    result_queue = Queue()
+    process = Process(target=_regex_worker, args=(pattern, text, result_queue))
+    process.start()
+    process.join(timeout=timeout)
+    
+    # If process is still running, it timed out - kill it
+    if process.is_alive():
+        process.terminate()
+        process.join(timeout=1)  # Give it a moment to die
+        if process.is_alive():
+            process.kill()  # Force kill if needed
+        logger.warning(f"Regex timeout - potential ReDoS: {pattern}")
+        raise TimeoutError("Regex matching timed out")
+    
+    # Get result from queue
+    if not result_queue.empty():
+        status, value = result_queue.get()
+        if status == 'error':
+            if isinstance(value, ValueError):
+                logger.error(f"Invalid regex: {value}")
+            raise value
+        return value
+    
+    # If we get here, something went wrong
+    return False
 
 
 def search_artifacts_internal(regex_str: str, offset: int = 0):
 
-    # Validate regex is not empty
-    if not regex_str or not regex_str.strip():
-        abort(400, description="Regex pattern cannot be empty")
-    
-    regex_str = regex_str.strip()
-    
-    logger.info(f"Searching artifacts with pattern: {regex_str}, offset: {offset}")
-    
-    # Check for malicious regex
-    if not is_safe_regex(regex_str):
-        logger.warning(f"Potentially malicious regex detected: {regex_str}")
-        abort(400, description="Malicious regex pattern detected")
-    
-    # Validate regex by trying to compile it
+    # ✅ 3. Validate regex syntax
     try:
         re.compile(regex_str, re.IGNORECASE)
     except re.error as e:
-        logger.error(f"Invalid regex pattern: {e}")
         abort(400, description=f"Invalid regex pattern: {str(e)}")
-    
-    # Scan DynamoDB for all artifacts
-    try:
-        response = META_TABLE.scan()
-        all_items = response.get("Items", [])
-        
-        while "LastEvaluatedKey" in response:
-            response = META_TABLE.scan(ExclusiveStartKey=response["LastEvaluatedKey"])
-            all_items.extend(response.get("Items", []))
-            
-    except ClientError as e:
-        logger.error(f"DynamoDB scan failed: {e}", exc_info=True)
-        abort(500, description="The artifact storage encountered an error.")
-    
-    # Search through artifacts
+
+    # ✅ 4. Scan DynamoDB
+    response = META_TABLE.scan()
+    all_items = response.get("Items", [])
+    while "LastEvaluatedKey" in response:
+        response = META_TABLE.scan(ExclusiveStartKey=response["LastEvaluatedKey"])
+        all_items.extend(response.get("Items", []))
+
+            # ✅ 5. Try matching — DO NOT abort if no matches
     results = []
     for item in all_items:
-        # Build searchable text from multiple fields
-        searchable_parts = [
-            item.get('filename', ''),
-            item.get('artifact_type', ''),
-            item.get('source_url', '')
-        ]
-        searchable = ' '.join(searchable_parts)
+     
+        searchable_parts = []
         
-        # Perform safe regex match
+        # Add artifact name
+        filename = item.get("filename", "")
+        if filename:
+            searchable_parts.append(filename)
+        
+        # Fetch and add README content if source_url is a HuggingFace URL
+        source_url = item.get("source_url", "")
+        if source_url and "huggingface.co/" in source_url:
+            try:
+                from acmecli.metrics.hf_api import extract_model_id, fetch_readme_content
+                model_id = extract_model_id(source_url)
+                readme_content = fetch_readme_content(model_id)
+                if readme_content:
+                    searchable_parts.append(readme_content)
+            except Exception as e:
+                logger.warning(f"Failed to fetch README for {source_url}: {e}")
+        
+        # Also include other string fields for completeness
+        for key, value in item.items():
+            if isinstance(value, str) and key not in ("filename", "source_url"):
+                searchable_parts.append(value)
+        
+        searchable = " ".join(searchable_parts)
+
+
         try:
             if safe_regex_match(regex_str, searchable):
-                artifact_id_raw = item.get("id", "")
-                
-                # Cast id to int if possible (for consistency)
+                # Convert ID to int if possible, otherwise keep as string
+                artifact_id = item.get("id")
                 try:
-                    artifact_id = int(artifact_id_raw)
+                    artifact_id = int(artifact_id)
                 except (TypeError, ValueError):
-                    artifact_id = artifact_id_raw
+                    pass
                 
                 results.append({
                     "name": item.get("filename", ""),
                     "id": artifact_id,
                     "type": item.get("artifact_type", "")
                 })
-                
         except TimeoutError:
-            logger.error(f"Regex timeout on artifact {item.get('id')}")
             abort(400, description="Regex pattern caused timeout (potential ReDoS)")
         except ValueError as e:
             abort(400, description=str(e))
-    
-    # Remove duplicates (by ID)
+
+    # ✅ 6. Deduplicate
+    seen = set()
     unique_results = []
-    seen_ids = set()
     for r in results:
-        if r["id"] not in seen_ids:
-            seen_ids.add(r["id"])
+        if r["id"] not in seen:
+            seen.add(r["id"])
             unique_results.append(r)
-    
-    # Apply pagination
+
+    # ✅ 7. Check if no results found - return 404 per spec
+    if len(unique_results) == 0:
+        abort(404, description="No artifact found under this regex.")
+
+    # ✅ 8. Pagination
     total = len(unique_results)
     end_idx = min(offset + MAX_RESULTS_PER_PAGE, total)
     paginated_results = unique_results[offset:end_idx]
-    
-    # Calculate next offset
+
     next_offset = str(end_idx) if end_idx < total else None
-    
-    # Build response with offset header
+
+    # ✅ 9. Return results
     response_obj = jsonify(paginated_results)
     if next_offset:
         response_obj.headers.add("offset", next_offset)
-    
-    logger.info(f"Search returned {len(paginated_results)}/{total} matching artifacts")
+
     return response_obj, 200
+
 
 
 @app.route("/artifact/byRegEx", methods=["POST"])

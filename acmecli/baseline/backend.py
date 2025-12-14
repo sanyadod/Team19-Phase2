@@ -3,13 +3,21 @@
 import logging
 from flask import Flask
 from flask_cors import CORS
+import acmecli.baseline.endpoints_delete as delete_module
 import acmecli.baseline.download as download_module
 import acmecli.baseline.upload as upload_module
 import acmecli.baseline.reset as reset_module
 import acmecli.baseline.cost as cost_module
 import acmecli.baseline.rate as rate_module
-import acmecli.baseline.search as search_module
+import acmecli.baseline.endpoints_search as search_module
 import acmecli.baseline.tracks as tracks_module
+import acmecli.baseline.endpoints_list as list_module
+import acmecli.baseline.endpoints_ingest as ingest_module
+import acmecli.baseline.endpoints_license as license_module
+import acmecli.baseline.endpoints_lineage as lineage_module
+
+
+
 
 # Configure logging
 logging.basicConfig(
@@ -32,6 +40,7 @@ def health():
     """
     return "", 200
 
+        
 # Register all routes from download.py
 for rule in download_module.app.url_map.iter_rules():
     # Skip the static route
@@ -43,6 +52,8 @@ for rule in download_module.app.url_map.iter_rules():
             methods=rule.methods
         )
 
+
+
 # Register all routes from upload.py
 for rule in upload_module.app.url_map.iter_rules():
     # Skip the static route
@@ -53,6 +64,17 @@ for rule in upload_module.app.url_map.iter_rules():
             view_func=upload_module.app.view_functions[rule.endpoint],
             methods=rule.methods
         )
+
+# Register all routes from endpoints_delete.py
+for rule in delete_module.app.url_map.iter_rules():
+    if rule.endpoint != 'static':
+        app.add_url_rule(
+            rule.rule,
+            endpoint=f"delete_{rule.endpoint}",
+            view_func=delete_module.app.view_functions[rule.endpoint],
+            methods=rule.methods
+        )
+
 
 #Register all routes from reset.py
 for rule in reset_module.app.url_map.iter_rules():
@@ -97,28 +119,62 @@ for rule in rate_module.app.url_map.iter_rules():
             view_func=rate_module.app.view_functions[rule.endpoint],
             methods=rule.methods
         )
-import acmecli.baseline.endpoints_list as list_module
-import acmecli.baseline.endpoints_search as search_module
-import acmecli.baseline.endpoints_ingest as ingest_module
 
-#registering all routes from modules
+
+# Register all routes from endpoints_list.py
 for rule in list_module.app.url_map.iter_rules():
+    # Skip the static route
     if rule.endpoint != 'static':
-        app.add_url_rule(rule.rule, endpoint=f"list_{rule.endpoint}",
-                         view_func=list_module.app.view_functions[rule.endpoint],
-                         methods=rule.methods)
+        app.add_url_rule(
+            rule.rule,
+            endpoint=f"list_{rule.endpoint}",  # Prefix to avoid conflicts
+            view_func=list_module.app.view_functions[rule.endpoint],
+            methods=rule.methods
+        )
 
+# Register all routes from search.py
 for rule in search_module.app.url_map.iter_rules():
+    # Skip the static route
     if rule.endpoint != 'static':
-        app.add_url_rule(rule.rule, endpoint=f"search_{rule.endpoint}",
-                         view_func=search_module.app.view_functions[rule.endpoint],
-                         methods=rule.methods)
+        app.add_url_rule(
+            rule.rule,
+            endpoint=f"search_{rule.endpoint}",  # Prefix to avoid conflicts
+            view_func=search_module.app.view_functions[rule.endpoint],
+            methods=rule.methods
+        )
 
+# Register all routes from ingest.py
 for rule in ingest_module.app.url_map.iter_rules():
+    # Skip the static route
     if rule.endpoint != 'static':
-        app.add_url_rule(rule.rule, endpoint=f"ingest_{rule.endpoint}",
-                         view_func=ingest_module.app.view_functions[rule.endpoint],
-                         methods=rule.methods)
+        app.add_url_rule(
+            rule.rule,
+            endpoint=f"ingest_{rule.endpoint}",  # Prefix to avoid conflicts
+            view_func=ingest_module.app.view_functions[rule.endpoint],
+            methods=rule.methods
+        )
+
+# Register all routes from endpoints_license.py
+for rule in license_module.app.url_map.iter_rules():
+    # Skip the static route
+    if rule.endpoint != 'static':
+        app.add_url_rule(
+            rule.rule,
+            endpoint=f"license_{rule.endpoint}",  # Prefix to avoid conflicts
+            view_func=license_module.app.view_functions[rule.endpoint],
+            methods=rule.methods
+        )
+
+# Register all routes from endpoints_lineage.py
+for rule in lineage_module.app.url_map.iter_rules():
+    # Skip the static route
+    if rule.endpoint != 'static':
+        app.add_url_rule(
+            rule.rule,
+            endpoint=f"lineage_{rule.endpoint}",  # Prefix to avoid conflicts
+            view_func=lineage_module.app.view_functions[rule.endpoint],
+            methods=rule.methods
+        )
 
 
 

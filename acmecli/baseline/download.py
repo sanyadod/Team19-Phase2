@@ -198,16 +198,26 @@ def list_artifacts():
 
         # Process each query
         for idx, query in enumerate(queries):
-            if not isinstance(query, dict) or "name" not in query:
+            if not isinstance(query, dict):
                 logger.error(
-                    "Invalid query #%d: not a dict or missing 'name' field: %s",
+                    "Invalid query #%d: not a dict: %s",
                     idx + 1,
                     query,
                 )
                 continue
 
-            query_name = str(query.get("name", "")).strip()
+            q_id = query.get("id")
+            q_name = query.get("name")
             query_types = query.get("types", [])
+
+            # Must have either id or name
+            if q_id is None and q_name is None:
+                logger.error(
+                    "Invalid query #%d: missing both 'id' and 'name' fields: %s",
+                    idx + 1,
+                    query,
+                )
+                continue
 
             # Filter by query - find exact match and return only one result per query
             for item in all_items:
@@ -225,8 +235,21 @@ def list_artifacts():
                 if query_types and artifact_type not in query_types:
                     continue
 
+                # ID has absolute priority - if ID is provided, match by ID only
+                if q_id is not None:
+                    if str(artifact_id_raw) == str(q_id):
+                        results.append(
+                            {
+                                "name": artifact_name,
+                                "id": artifact_id,
+                                "type": artifact_type,
+                            }
+                        )
+                        break  # Only return first match for ID query
+                    continue
+
                 # Match by name: "*" means all, otherwise exact match only
-                if query_name == "*":
+                if q_name == "*":
                     results.append(
                         {
                             "name": artifact_name,
@@ -234,7 +257,8 @@ def list_artifacts():
                             "type": artifact_type,
                         }
                     )
-                elif query_name == artifact_name:  # Exact match only
+                    # Don't break for "*" - continue to add all matches
+                elif q_name and q_name == artifact_name:  # Exact match only
                     results.append(
                         {
                             "name": artifact_name,
@@ -242,7 +266,7 @@ def list_artifacts():
                             "type": artifact_type,
                         }
                     )
-                    break  # Only return first exact match
+                    break  # Only return first exact match for name query
 
         # Remove duplicates (same artifact might match multiple queries)
         seen_ids = set()
