@@ -2,7 +2,6 @@ from flask import Flask, request, abort, jsonify
 import logging
 import json
 
-# Import your existing upload module
 import acmecli.baseline.upload as upload_module
 
 app = Flask(__name__)
@@ -11,7 +10,7 @@ logger = logging.getLogger(__name__)
 VALID_TYPES = {"model", "dataset", "code"}
 DEFAULT_TYPE = "model"
 
-# Import Phase 1 scoring (if available)
+# Import Phase 1 scoring
 try:
     from acmecli.metrics.hf_api import build_context_from_api
     from acmecli.scoring import compute_all_scores
@@ -25,7 +24,6 @@ except ImportError as e:
 def score_model(url: str) -> dict:
 
     if not SCORING_AVAILABLE:
-        # Mock scores for testing (all pass threshold)
         logger.warning("Using mock scores - Phase 1 scoring not available")
         return {
             "net_score": 0.75,
@@ -60,7 +58,7 @@ def score_model(url: str) -> dict:
 
 def check_ingestibility(scores: dict) -> tuple:
 
-    # Metrics that must be >= 0.5 (exclude latency and size_score)
+    # Metrics that must be >= 0.5
     required_metrics = [
         "license",
         "ramp_up_time",
@@ -150,9 +148,7 @@ def ingest_artifact():
         # Step 3: Use upload module to create the artifact
         logger.info("Step 3: Uploading artifact using upload module...")
         
-
         
-        # Create a mock request context for upload module
         with app.test_request_context(
             f"/artifact/{artifact_type}",
             method="POST",

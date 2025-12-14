@@ -12,7 +12,7 @@ DYNAMODB = boto3.resource("dynamodb", region_name=AWS_REGION)
 META_TABLE = DYNAMODB.Table("artifact")
 
 MAX_RESULTS = 1000  # Prevent DoS by returning too many results
-PAGE_SIZE = 100     # Results per page
+PAGE_SIZE = 100 
 
 
 @app.route("/artifacts", methods=["GET"])
@@ -57,7 +57,7 @@ def list_all_artifacts():
         
         # Apply pagination
         total = len(results)
-        end_idx = min(offset + PAGE_SIZE, total)  # ✅ FIXED: comma instead of plus
+        end_idx = min(offset + PAGE_SIZE, total)
         paginated = results[offset:end_idx]
         
         # Calculate next offset

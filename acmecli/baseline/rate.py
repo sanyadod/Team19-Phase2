@@ -22,8 +22,6 @@ from acmecli.metrics.hf_api import (
 app = Flask(__name__)
 CORS(app)
 
-# ---------- Helpers ----------
-
 def _score_from_context(name: str, context: dict) -> dict:
     """
     Turn HF context into a ModelRating-style dict.
@@ -31,10 +29,6 @@ def _score_from_context(name: str, context: dict) -> dict:
     """
 
     lat = context.get("latencies", {})
-
-    # ----- Core scores (placeholder mapping) -----
-    # You probably already have a module that does this more precisely.
-    # If so, REPLACE these with calls into that module.
 
     # Size (bytes -> 0..1 for each hardware tier)
     total_bytes = float(context.get("total_bytes", 50_000_000))
@@ -59,7 +53,7 @@ def _score_from_context(name: str, context: dict) -> dict:
     docs = context.get("docs", {}) or {}
     ramp_up_time = float(docs.get("readme", 0.5))
 
-    # License quality from context.license_text (you might have a better mapping)
+    # License quality from context.license_text
     license_text = str(context.get("license_text", "")).lower()
     if "apache" in license_text:
         license_score = 1.0
@@ -115,13 +109,12 @@ def _score_from_context(name: str, context: dict) -> dict:
         perf_claims += 0.4
 
     # Reproducibility & reviewedness – temporary simple values
-    reproducibility = 0.0   # You can improve using docs/HF metadata or GitHub later
+    reproducibility = 0.0
     reviewedness = -1.0
 
-    # Tree score (Phase 2) – for now, None or 0.0 – you already have compute_treescore for DB-backed models
+    # compute_treescore for DB-backed models
     tree_score = None
 
-    # ----- Net score (same formula as compute_netscore) -----
     net_score = (
         0.20 * license_score +
         0.20 * dataset_and_code_score +
@@ -130,10 +123,9 @@ def _score_from_context(name: str, context: dict) -> dict:
         0.10 * bus_factor +
         0.10 * perf_claims +
         0.05 * dataset_quality +
-        0.05 * max(size_score.values())  # crude aggregate size suitability
+        0.05 * max(size_score.values())
     )
 
-    # ----- Latencies -----
     size_latency = float(lat.get("size_score_latency", 1))
     license_latency = float(lat.get("license_latency", 1))
     ramp_latency = float(lat.get("ramp_up_time_latency", 1))
@@ -143,13 +135,12 @@ def _score_from_context(name: str, context: dict) -> dict:
     cqual_latency = float(lat.get("code_quality_latency", 1))
     perf_latency = float(lat.get("performance_claims_latency", 1))
 
-    # Approximate net_score_latency as sum of contributors
+    # Approximate net_score_latency 
     net_score_latency = (
         size_latency + license_latency + ramp_latency + bus_latency +
         dac_latency + dqual_latency + cqual_latency + perf_latency
     )
 
-    # Reuse some latencies for repro/ reviewedness/ tree for now
     repro_latency = 1.0
     rev_latency = 1.0
     tree_latency = 1.0
@@ -167,9 +158,6 @@ def _score_from_context(name: str, context: dict) -> dict:
     perf_latency_s = ms_to_s(perf_latency)
 
     net_score_latency_s = ms_to_s(net_score_latency)
-
-    # and return *_latency fields using the *_s values
-
 
     return {
         "name": name,
@@ -210,7 +198,6 @@ def _require_auth() -> str:
         or ""
     ).strip()
 
-    # Auth is OPTIONAL for baseline — don't 403 if missing
     return token
 
 
@@ -225,9 +212,6 @@ def _load_model_or_404(model_id: str):
         abort(404, description="Model does not exist.")
     return item
 
-
-# ---------- /rate/v0 ----------
-
 @app.get("/rate/v0/<model_id>")
 def rate_v0(model_id: str):
     """
@@ -237,7 +221,7 @@ def rate_v0(model_id: str):
     _require_auth()
     item = _load_model_or_404(model_id)
 
-    # Use stored net_score as v0 result (no recompute)
+    # Use stored net_score as v0 result
     body = {
         "model_id": model_id,
         "version": item.get("version"),
@@ -252,8 +236,6 @@ def rate_v0(model_id: str):
         "perf_claims": float(item.get("perf_claims", 0.0)),
     }
     return jsonify(body), 200
-
-# ---------- /rate/v1 ----------
 
 @app.get("/rate/v1/<model_id>")
 def rate_v1(model_id: str):
@@ -280,11 +262,11 @@ def rate_v1(model_id: str):
     if not source_url:
         abort(500, description="Model source_url is missing; cannot rate.")
 
-    # Build HF context (this is where all the heavy lifting happens)
+    # Build HF context
     try:
         context = build_context_from_api(source_url)
     except Exception as e:
-        # If HF lookup fails, comply with spec's 500-language
+        # HF lookup fails
         abort(500, description="The artifact rating system encountered an error while computing at least one metric.")
 
     # Convert context into ModelRating fields
