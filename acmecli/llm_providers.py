@@ -18,6 +18,14 @@ from typing import Any, Dict
 
 import requests
 
+# Load .env file if python-dotenv is available
+try:
+    from dotenv import load_dotenv
+    load_dotenv()  # Load .env file from project root or current directory
+except ImportError:
+    # python-dotenv not installed, skip .env loading
+    pass
+
 logger = logging.getLogger(__name__)
 
 
