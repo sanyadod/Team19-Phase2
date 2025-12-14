@@ -138,6 +138,10 @@ def ingest_artifact():
         upload_payload = {"url": url}
         if name is not None:
             upload_payload["name"] = name
+        
+        # Pass through parents field if provided (only for models)
+        if artifact_type == "model" and "parents" in payload:
+            upload_payload["parents"] = payload["parents"]
 
         with app.test_request_context(
             f"/artifact/{artifact_type}",
