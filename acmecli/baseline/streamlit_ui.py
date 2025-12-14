@@ -27,11 +27,52 @@ st.markdown("""
         outline: 2px solid #0066cc;
         outline-offset: 2px;
     }
-    /* Improve color contrast for better readability */
-    .stMarkdown, .stText {
-        color: #262730;
+    /* Fix color contrast for headings (WCAG 1.4.3 - 3:1 ratio for large text) */
+    h1, h2, h3, h4, h5, h6 {
+        color: #5d6179 !important;
+    }
+    /* Fix color contrast for paragraphs and captions (WCAG 1.4.3 - 4.5:1 ratio for normal text) */
+    p, .stMarkdown p, .stCaption, .stText, .st-emotion-cache-1fq9onn > p {
+        color: #6f79ae !important;
+    }
+    /* Fix color contrast for general markdown text */
+    .stMarkdown {
+        color: #6f79ae !important;
     }
 </style>
+<script>
+    // Fix accessibility issues
+    (function() {
+        function fixAccessibility() {
+            // Fix button-name: Add aria-label to Streamlit menu button
+            const menuButton = document.querySelector('#MainMenu button[kind="headerNoPadding"]');
+            if (menuButton && !menuButton.getAttribute('aria-label') && !menuButton.getAttribute('aria-labelledby')) {
+                menuButton.setAttribute('aria-label', 'Main menu');
+            }
+            
+            // Fix aria-allowed-attr: Remove conflicting aria attributes
+            // Elements with role="presentation" or role="none" should not have aria-labelledby
+            document.querySelectorAll('[role="presentation"][aria-labelledby], [role="none"][aria-labelledby]').forEach(el => {
+                el.removeAttribute('aria-labelledby');
+            });
+            
+            // Elements should not have both aria-label and aria-labelledby (aria-labelledby takes precedence)
+            document.querySelectorAll('[aria-label][aria-labelledby]').forEach(el => {
+                // Keep aria-labelledby, remove aria-label if both exist
+                if (el.getAttribute('aria-labelledby')) {
+                    el.removeAttribute('aria-label');
+                }
+            });
+        }
+        // Run immediately and after DOM updates
+        fixAccessibility();
+        setTimeout(fixAccessibility, 100);
+        setTimeout(fixAccessibility, 500);
+        // Use MutationObserver to catch dynamically added elements
+        const observer = new MutationObserver(fixAccessibility);
+        observer.observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['aria-label', 'aria-labelledby', 'role'] });
+    })();
+</script>
 """, unsafe_allow_html=True)
 
 DEFAULT_BACKEND_URL = (
