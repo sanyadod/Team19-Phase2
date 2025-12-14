@@ -2,7 +2,7 @@ from flask import Flask, jsonify, abort
 import boto3
 from botocore.exceptions import ClientError
 import logging
-from typing import Dict, List, Any, Optional
+from typing import Dict, List, Any
 
 app = Flask(__name__)
 logger = logging.getLogger(__name__)
@@ -23,7 +23,6 @@ def _valid_type(artifact_type: str) -> bool:
 
 
 def _valid_id(artifact_id: str) -> bool:
-    # match your baseline style: allow alnum + - . _
     if not artifact_id:
         return False
     return all(c.isalnum() or c in "-._" for c in artifact_id)
@@ -50,120 +49,92 @@ def _scan_all_artifacts() -> List[Dict[str, Any]]:
     try:
         response = META_TABLE.scan()
         items = response.get("Items", [])
+
         while "LastEvaluatedKey" in response:
-            response = META_TABLE.scan(ExclusiveStartKey=response["LastEvaluatedKey"])
+            response = META_TABLE.scan(
+                ExclusiveStartKey=response["LastEvaluatedKey"]
+            )
             items.extend(response.get("Items", []))
+
         return items
     except ClientError as e:
         logger.error("DynamoDB scan failed: %s", e, exc_info=True)
         return []
 
 
-def _to_int_id(id_value: Any) -> int:
-    """
-    The OpenAPI example shows numeric IDs, and autograder typically enforces that.
-    DynamoDB stores ids as strings, but responses should use int.
-    """
-    try:
-        return int(str(id_value))
-    except Exception:
-        # If it cannot be converted, metadata is malformed for lineage purposes
-        raise ValueError(f"Invalid artifact id (not int-convertible): {id_value}")
-
-
-def _name_for_item(item: Dict[str, Any], fallback: str) -> str:
-    return str(item.get("filename") or item.get("name") or fallback)
-
-
 # -----------------------------
-# Lineage builder (BASELINE: 1-hop parents + 1-hop children)
+# Lineage builder (BASELINE)
 # -----------------------------
 
 def _build_lineage_graph(start_artifact: Dict[str, Any], artifact_id: str) -> Dict[str, Any]:
     nodes: List[Dict[str, Any]] = []
     edges: List[Dict[str, Any]] = []
+    seen_ids = set()
 
-    # Use strings for DB comparisons, ints for API output
-    start_id_raw = start_artifact.get("id", artifact_id)
-    start_id_str = str(start_id_raw)
-    start_id_int = _to_int_id(start_id_raw)
+    # --- Start node ---
+    start_id = int(start_artifact["id"])
+    start_name = start_artifact.get("filename", str(start_id))
 
-    seen_node_ints = set()
-
-    # add start node
     nodes.append({
-        "artifact_id": start_id_int,
-        "name": _name_for_item(start_artifact, start_id_str),
+        "artifact_id": start_id,
+        "name": start_name,
         "source": "config_json",
     })
-    seen_node_ints.add(start_id_int)
+    seen_ids.add(start_id)
 
-    # -----------------------------
-    # Parents (direct)
-    # -----------------------------
-    if "parents" in start_artifact:
-        parents = start_artifact.get("parents")
-        if not isinstance(parents, list):
-            abort(
-                400,
-                description="The lineage graph cannot be computed because the artifact metadata is missing or malformed.",
-            )
+    # --- Parents (direct only) ---
+    parents = start_artifact.get("parents", [])
+    if not isinstance(parents, list):
+        abort(
+            400,
+            description="The lineage graph cannot be computed because the artifact metadata is missing or malformed.",
+        )
 
-        for p in parents:
-            if p is None:
-                continue
-            parent_id_str = str(p)
+    for parent_id in parents:
+        try:
+            parent_id_int = int(parent_id)
+        except Exception:
+            continue
 
-            # parent node name best-effort: lookup from DB
-            parent_item = None
-            try:
-                parent_item = META_TABLE.get_item(Key={"id": parent_id_str}).get("Item")
-            except ClientError:
-                parent_item = None
-
-            parent_id_int = _to_int_id(parent_id_str)
-
-            if parent_id_int not in seen_node_ints:
-                nodes.append({
-                    "artifact_id": parent_id_int,
-                    "name": _name_for_item(parent_item or {}, parent_id_str),
-                    "source": "config_json",
-                })
-                seen_node_ints.add(parent_id_int)
-
-            edges.append({
-                "from_node_artifact_id": parent_id_int,
-                "to_node_artifact_id": start_id_int,
-                "relationship": "base_model",
+        if parent_id_int not in seen_ids:
+            nodes.append({
+                "artifact_id": parent_id_int,
+                "name": str(parent_id_int),
+                "source": "config_json",
             })
+            seen_ids.add(parent_id_int)
 
-    # -----------------------------
-    # Children (direct)
-    # -----------------------------
-    all_items = _scan_all_artifacts()
+        edges.append({
+            "from_node_artifact_id": parent_id_int,
+            "to_node_artifact_id": start_id,
+            "relationship": "base_model",
+        })
 
-    for item in all_items:
-        item_parents = item.get("parents")
+    # --- Children (direct only) ---
+    all_artifacts = _scan_all_artifacts()
+
+    for item in all_artifacts:
+        item_parents = item.get("parents", [])
         if not isinstance(item_parents, list):
             continue
 
-        # compare as strings (DB ids are strings)
-        if start_id_str in [str(x) for x in item_parents]:
-            child_id_raw = item.get("id")
-            child_id_str = str(child_id_raw)
-            child_id_int = _to_int_id(child_id_str)
+        try:
+            item_id_int = int(item["id"])
+        except Exception:
+            continue
 
-            if child_id_int not in seen_node_ints:
+        if start_id in [int(p) for p in item_parents if str(p).isdigit()]:
+            if item_id_int not in seen_ids:
                 nodes.append({
-                    "artifact_id": child_id_int,
-                    "name": _name_for_item(item, child_id_str),
+                    "artifact_id": item_id_int,
+                    "name": item.get("filename", str(item_id_int)),
                     "source": "config_json",
                 })
-                seen_node_ints.add(child_id_int)
+                seen_ids.add(item_id_int)
 
             edges.append({
-                "from_node_artifact_id": start_id_int,
-                "to_node_artifact_id": child_id_int,
+                "from_node_artifact_id": start_id,
+                "to_node_artifact_id": item_id_int,
                 "relationship": "base_model",
             })
 
@@ -176,7 +147,7 @@ def _build_lineage_graph(start_artifact: Dict[str, Any], artifact_id: str) -> Di
 
 @app.route("/artifact/<artifact_type>/<artifact_id>/lineage", methods=["GET"])
 def get_lineage(artifact_type: str, artifact_id: str):
-    # IMPORTANT: baseline DOES NOT require auth, autograder won't send it
+    # ❌ No auth for baseline
 
     if not _valid_type(artifact_type):
         abort(
@@ -187,6 +158,7 @@ def get_lineage(artifact_type: str, artifact_id: str):
             ),
         )
 
+    # 🔴 Critical: reject malformed IDs BEFORE DynamoDB
     if not _valid_id(artifact_id):
         abort(
             400,
@@ -196,22 +168,15 @@ def get_lineage(artifact_type: str, artifact_id: str):
             ),
         )
 
-    meta = _fetch_metadata(artifact_type, artifact_id)
-    if not isinstance(meta, dict):
+    metadata = _fetch_metadata(artifact_type, artifact_id)
+
+    if not isinstance(metadata, dict):
         abort(
             400,
             description="The lineage graph cannot be computed because the artifact metadata is missing or malformed.",
         )
 
-    try:
-        graph = _build_lineage_graph(meta, artifact_id)
-    except ValueError as e:
-        logger.error("Lineage build failed: %s", e, exc_info=True)
-        abort(
-            400,
-            description="The lineage graph cannot be computed because the artifact metadata is missing or malformed.",
-        )
-
+    graph = _build_lineage_graph(metadata, artifact_id)
     return jsonify(graph), 200
 
 
