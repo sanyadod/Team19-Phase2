@@ -2,6 +2,7 @@ from flask import Flask, jsonify, abort
 import boto3
 from botocore.exceptions import ClientError
 import logging
+import json
 from typing import Dict, List, Any, Optional
 
 app = Flask(__name__)
@@ -75,9 +76,75 @@ def _scan_all_models() -> Dict[str, Dict[str, Any]]:
         abort(500, description="The artifact storage encountered an error.")
 
 
-def _build_parents_and_children_maps(models: Dict[str, Dict[str, Any]]) -> tuple:
+def _build_name_to_id_map(models: Dict[str, Dict[str, Any]]) -> Dict[str, str]:
     """
-    Build two maps from all models:
+    Build a map from human-readable model names to artifact IDs.
+    Prefers: item["name"] > item["filename"] > item["id"]
+    """
+    name_to_id = {}
+    for model_id, model_data in models.items():
+        # Try name first, then filename, then id as fallback
+        name = model_data.get("name") or model_data.get("filename") or model_id
+        name_str = str(name).strip()
+        if name_str:
+            # If multiple models have the same name, last one wins (or we could handle collisions)
+            name_to_id[name_str] = model_id
+    
+    logger.info(f"Built name_to_id map with {len(name_to_id)} entries")
+    return name_to_id
+
+
+def parse_config_json(item: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """
+    Parse config_json from a model item.
+    config_json may be a dict or a JSON string.
+    Returns None if config_json is missing or malformed.
+    """
+    config_json = item.get("config_json")
+    if config_json is None:
+        return None
+    
+    # If it's already a dict, return it
+    if isinstance(config_json, dict):
+        return config_json
+    
+    # If it's a string, try to parse it
+    if isinstance(config_json, str):
+        try:
+            return json.loads(config_json)
+        except (json.JSONDecodeError, ValueError) as e:
+            logger.warning(f"Failed to parse config_json string: {e}")
+            return None
+    
+    # Unknown type
+    logger.warning(f"config_json has unexpected type: {type(config_json)}")
+    return None
+
+
+def extract_parent_name(config: Dict[str, Any]) -> Optional[str]:
+    """
+    Extract parent/base-model name from config.json.
+    Checks in order: base_model_name_or_path, name_or_path, _name_or_path
+    Returns None if none found.
+    """
+    if not isinstance(config, dict):
+        return None
+    
+    # Try in order of preference
+    for key in ["base_model_name_or_path", "name_or_path", "_name_or_path"]:
+        value = config.get(key)
+        if value:
+            parent_name = str(value).strip()
+            if parent_name:
+                return parent_name
+    
+    return None
+
+
+def _build_parents_and_children_maps(models: Dict[str, Dict[str, Any]], 
+                                     name_to_id: Dict[str, str]) -> tuple:
+    """
+    Build two maps from all models by parsing config.json:
     - parents_map[child_id] = [parent_id1, parent_id2, ...]
     - children_map[parent_id] = [child_id1, child_id2, ...]
     
@@ -87,27 +154,36 @@ def _build_parents_and_children_maps(models: Dict[str, Dict[str, Any]]) -> tuple
     children_map: Dict[str, List[str]] = {}
     
     for model_id, model_data in models.items():
-        parents = model_data.get("parents", [])
-        
-        # Validate parents is a list
-        if parents is not None and not isinstance(parents, list):
-            logger.warning(f"Model {model_id} has invalid parents field (not a list), skipping")
+        # Parse config_json
+        config = parse_config_json(model_data)
+        if config is None:
+            # No config_json or malformed - treat as no parent
             continue
         
-        # Build parents_map (child -> parents)
-        valid_parents = []
-        for parent_id in parents:
-            parent_id_str = str(parent_id)
-            # Only include parents that exist in our registry
-            if parent_id_str and parent_id_str in models:
-                valid_parents.append(parent_id_str)
-                # Build children_map (parent -> children)
-                if parent_id_str not in children_map:
-                    children_map[parent_id_str] = []
-                children_map[parent_id_str].append(model_id)
+        # Extract parent name from config
+        parent_name = extract_parent_name(config)
+        if not parent_name:
+            # No parent name found in config
+            continue
         
-        if valid_parents:
-            parents_map[model_id] = valid_parents
+        # Convert parent name to ID
+        parent_id = name_to_id.get(parent_name)
+        if not parent_id:
+            # Parent name not found in registry - ignore it
+            logger.debug(f"Parent name '{parent_name}' not found in registry for model {model_id}")
+            continue
+        
+        # Only include if parent exists in our models
+        if parent_id in models:
+            # Build parents_map (child -> parents)
+            if model_id not in parents_map:
+                parents_map[model_id] = []
+            parents_map[model_id].append(parent_id)
+            
+            # Build children_map (parent -> children)
+            if parent_id not in children_map:
+                children_map[parent_id] = []
+            children_map[parent_id].append(model_id)
     
     logger.info(f"Built maps: {len(parents_map)} models with parents, {len(children_map)} models with children")
     return parents_map, children_map
@@ -185,10 +261,11 @@ def _build_lineage_graph(start_id: str, models: Dict[str, Dict[str, Any]],
     nodes = []
     for node_id in sorted(all_node_ids):  # Sort for consistent output
         model_data = models.get(node_id, {})
-        node_name = model_data.get("filename", node_id)
+        # Get human name: prefer name, then filename, then id
+        node_name = model_data.get("name") or model_data.get("filename") or node_id
         nodes.append({
             "artifact_id": node_id,
-            "name": node_name,
+            "name": str(node_name),
             "source": "config_json",
         })
     
@@ -252,18 +329,25 @@ def get_lineage(artifact_id: str):
     
     start_model = models[start_id]
     
-    # Validate parents field if it exists
-    parents = start_model.get("parents")
-    if parents is not None and not isinstance(parents, list):
-        logger.error(f"Model {start_id} has invalid parents field: {type(parents)}")
-        abort(
-            400,
-            description="The lineage graph cannot be computed because the artifact metadata is missing or malformed.",
-        )
+    # Validate config_json if present (check for malformed JSON)
+    config_json = start_model.get("config_json")
+    if config_json is not None:
+        parsed_config = parse_config_json(start_model)
+        if parsed_config is None and isinstance(config_json, str):
+            # config_json exists as string but failed to parse
+            logger.error(f"Model {start_id} has malformed config_json")
+            abort(
+                400,
+                description="The lineage graph cannot be computed because the artifact metadata is missing or malformed.",
+            )
     
-    # Build parent/child maps
-    logger.info("Building parent/child relationship maps...")
-    parents_map, children_map = _build_parents_and_children_maps(models)
+    # Build name_to_id map
+    logger.info("Building name_to_id map...")
+    name_to_id = _build_name_to_id_map(models)
+    
+    # Build parent/child maps from config.json
+    logger.info("Building parent/child relationship maps from config.json...")
+    parents_map, children_map = _build_parents_and_children_maps(models, name_to_id)
     
     # Build lineage graph
     graph = _build_lineage_graph(start_id, models, parents_map, children_map)
