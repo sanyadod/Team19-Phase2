@@ -1,8 +1,8 @@
-from flask import Flask, request, jsonify, abort
+from flask import Flask, jsonify, abort
 import boto3
 from botocore.exceptions import ClientError
 import logging
-from typing import Dict, List, Any, Set
+from typing import Dict, List, Any
 
 app = Flask(__name__)
 logger = logging.getLogger(__name__)
@@ -14,29 +14,25 @@ META_TABLE = DYNAMODB.Table("artifact")
 VALID_TYPES = {"model", "dataset", "code"}
 
 
-def _require_auth() -> str:
-    """Check for X-Authorization header."""
-    token = request.headers.get("X-Authorization")
-    if not token or not token.strip():
-        abort(403, description="Authentication failed due to invalid or missing AuthenticationToken.")
-    return token
-
+# -----------------------------
+# Helpers
+# -----------------------------
 
 def _valid_type(artifact_type: str) -> bool:
     return artifact_type in VALID_TYPES
 
 
 def _valid_id(artifact_id: str) -> bool:
-    """Minimal validation - treat IDs as opaque strings."""
-    return bool(artifact_id and artifact_id.strip())
+    if not artifact_id:
+        return False
+    return all(c.isalnum() or c in "-._" for c in artifact_id)
 
 
-def _fetch_metadata(artifact_type: str, artifact_id: str) -> dict:
-    """Fetch artifact metadata from DynamoDB."""
+def _fetch_metadata(artifact_type: str, artifact_id: str) -> Dict[str, Any]:
     try:
         resp = META_TABLE.get_item(Key={"id": artifact_id})
     except ClientError as e:
-        logger.error(f"DynamoDB get_item failed: {e}", exc_info=True)
+        logger.error("DynamoDB get_item failed: %s", e, exc_info=True)
         abort(500, description="The artifact storage encountered an error.")
 
     item = resp.get("Item")
@@ -49,232 +45,110 @@ def _fetch_metadata(artifact_type: str, artifact_id: str) -> dict:
     return item
 
 
-def _get_all_artifacts() -> List[Dict[str, Any]]:
-    """Get all artifacts from DynamoDB."""
+def _scan_all_artifacts() -> List[Dict[str, Any]]:
     try:
         response = META_TABLE.scan()
         items = response.get("Items", [])
-        
-        # Handle pagination
+
         while "LastEvaluatedKey" in response:
             response = META_TABLE.scan(
                 ExclusiveStartKey=response["LastEvaluatedKey"]
             )
             items.extend(response.get("Items", []))
-        
+
         return items
     except ClientError as e:
-        logger.error(f"DynamoDB scan failed: {e}", exc_info=True)
+        logger.error("DynamoDB scan failed: %s", e, exc_info=True)
         return []
 
 
-def _normalize_id_for_comparison(id_value: Any) -> str:
-    """Normalize ID to string for comparison purposes only. Treat IDs as opaque."""
-    if id_value is None:
-        return ""
-    return str(id_value)
+# -----------------------------
+# Lineage builder (BASELINE)
+# -----------------------------
 
-
-def _find_artifact_by_id(artifact_id: Any, all_artifacts: List[Dict[str, Any]]) -> Dict[str, Any] | None:
-    """Find an artifact by ID in the all_artifacts list. Treat IDs as opaque."""
-    normalized_id = _normalize_id_for_comparison(artifact_id)
-    for item in all_artifacts:
-        if _normalize_id_for_comparison(item.get("id")) == normalized_id:
-            return item
-    return None
-
-
-def _build_lineage_graph(start_artifact: Dict[str, Any], artifact_id: Any, all_artifacts: List[Dict[str, Any]]) -> Dict[str, Any]:
-    """
-    Build a transitive lineage graph starting from the given artifact.
-    Recursively includes all ancestors (parents of parents) and descendants (children of children).
-    Treats IDs as opaque values (like upload/download endpoints do).
-    
-    Lineage semantics:
-    - If artifact A has parents = [B, C], then B and C are parents of A
-    - Edges represent: parent -> child (from_node -> to_node)
-    - So edges are: B -> A, C -> A
-    """
-    # Track all nodes and edges we've discovered
-    # Use normalized string IDs as keys for comparison, but preserve original ID types
-    nodes: Dict[str, Dict[str, Any]] = {}  # normalized_id -> node data
+def _build_lineage_graph(start_artifact: Dict[str, Any], artifact_id: str) -> Dict[str, Any]:
+    nodes: List[Dict[str, Any]] = []
     edges: List[Dict[str, Any]] = []
-    visited: Set[str] = set()  # Track visited nodes to avoid cycles
-    
-    def add_node(node_id: Any, artifact: Dict[str, Any] | None = None) -> Any:
-        """Helper to add a node to the graph. Treats ID as opaque. Returns the stored artifact_id."""
-        normalized_id = _normalize_id_for_comparison(node_id)
-        if normalized_id in nodes:
-            # Return the stored artifact_id
-            return nodes[normalized_id]["artifact_id"]
-        
-        # Use original ID type from artifact if available, otherwise use node_id as-is
-        if artifact:
-            artifact_id_value = artifact.get("id", node_id)
-            node_name = artifact.get("filename") or artifact.get("name") or _normalize_id_for_comparison(artifact_id_value)
-        else:
-            artifact_id_value = node_id
-            node_name = _normalize_id_for_comparison(node_id)
-        
-        nodes[normalized_id] = {
-            "artifact_id": artifact_id_value,  # Keep original type (opaque)
-            "name": str(node_name),
-            "source": "config_json"
-        }
-        return artifact_id_value
-    
-    def walk_up(parent_id: Any) -> None:
-        """Recursively walk up the parent chain."""
-        normalized_parent_id = _normalize_id_for_comparison(parent_id)
-        if normalized_parent_id in visited or not normalized_parent_id:
-            return
-        
-        visited.add(normalized_parent_id)
-        
-        # Find the parent artifact
-        parent_artifact = _find_artifact_by_id(parent_id, all_artifacts)
-        
-        # Add parent node (even if not found in DB - include all referenced artifacts)
-        # Returns the stored artifact_id
-        parent_id_stored = add_node(parent_id, parent_artifact)
-        
-        # Get parent's parents and recurse
-        if parent_artifact:
-            parent_parents = parent_artifact.get("parents", [])
-            if isinstance(parent_parents, list):
-                for grandparent_id in parent_parents:
-                    normalized_grandparent_id = _normalize_id_for_comparison(grandparent_id)
-                    if normalized_grandparent_id:
-                        # Find grandparent artifact first
-                        grandparent_artifact = _find_artifact_by_id(grandparent_id, all_artifacts)
-                        # Add grandparent node BEFORE adding edge (ensures node exists)
-                        # Returns the stored artifact_id
-                        grandparent_id_stored = add_node(grandparent_id, grandparent_artifact)
-                        
-                        edges.append({
-                            "from_node_artifact_id": grandparent_id_stored,  # Use exact ID from node
-                            "to_node_artifact_id": parent_id_stored,  # Use exact ID from node
-                            "relationship": "parent"
-                        })
-                        # Recurse up to get grandparent's parents
-                        walk_up(grandparent_id)
-    
-    def walk_down(child_id: Any) -> None:
-        """Recursively walk down the child chain."""
-        normalized_child_id = _normalize_id_for_comparison(child_id)
-        if normalized_child_id in visited or not normalized_child_id:
-            return
-        
-        visited.add(normalized_child_id)
-        
-        # Find the child artifact
-        child_artifact = _find_artifact_by_id(child_id, all_artifacts)
-        
-        # Add child node (even if not found in DB - include all referenced artifacts)
-        # Returns the stored artifact_id
-        child_id_stored = add_node(child_id, child_artifact)
-        
-        # Find children of this child (grandchildren)
-        for item in all_artifacts:
-            item_parents = item.get("parents", [])
-            if isinstance(item_parents, list):
-                # Check if this item has child_id as a parent
-                item_id = item.get("id")
-                normalized_item_id = _normalize_id_for_comparison(item_id)
-                normalized_child_id_str = _normalize_id_for_comparison(child_id)
-                
-                for p in item_parents:
-                    if _normalize_id_for_comparison(p) == normalized_child_id_str:
-                        # Add grandchild node BEFORE adding edge (ensures node exists)
-                        # Returns the stored artifact_id
-                        item_id_stored = add_node(item_id, item)
-                        
-                        edges.append({
-                            "from_node_artifact_id": child_id_stored,  # Use exact ID from node
-                            "to_node_artifact_id": item_id_stored,  # Use exact ID from node
-                            "relationship": "parent"
-                        })
-                        # Recurse down to get grandchild's children
-                        walk_down(item_id)
-                        break
-    
-    # Start with the artifact itself
-    normalized_start_id = _normalize_id_for_comparison(artifact_id)
-    visited.add(normalized_start_id)
-    # Get the stored artifact_id from the node (ensures exact match)
-    start_artifact_id = add_node(artifact_id, start_artifact)
-    
-    # Walk up: get all ancestors
+    seen_ids = set()
+
+    # --- Start node ---
+    start_id = int(start_artifact["id"])
+    start_name = start_artifact.get("filename", str(start_id))
+
+    nodes.append({
+        "artifact_id": start_id,
+        "name": start_name,
+        "source": "config_json",
+    })
+    seen_ids.add(start_id)
+
+    # --- Parents (direct only) ---
     parents = start_artifact.get("parents", [])
-    if isinstance(parents, list):
-        for parent_id in parents:
-            normalized_parent_id = _normalize_id_for_comparison(parent_id)
-            if normalized_parent_id:
-                # Find parent to get its original ID type
-                parent_artifact = _find_artifact_by_id(parent_id, all_artifacts)
-                # Add parent node BEFORE adding edge (ensures node exists)
-                # Returns the stored artifact_id
-                parent_id_stored = add_node(parent_id, parent_artifact)
-                
-                # Add edge: parent -> start
-                edges.append({
-                    "from_node_artifact_id": parent_id_stored,  # Use exact ID from node
-                    "to_node_artifact_id": start_artifact_id,  # Use exact ID from node
-                    "relationship": "parent"
-                })
-                # Recurse up
-                walk_up(parent_id)
-    
-    # Walk down: get all descendants
+    if not isinstance(parents, list):
+        abort(
+            400,
+            description="The lineage graph cannot be computed because the artifact metadata is missing or malformed.",
+        )
+
+    for parent_id in parents:
+        try:
+            parent_id_int = int(parent_id)
+        except Exception:
+            continue
+
+        if parent_id_int not in seen_ids:
+            nodes.append({
+                "artifact_id": parent_id_int,
+                "name": str(parent_id_int),
+                "source": "config_json",
+            })
+            seen_ids.add(parent_id_int)
+
+        edges.append({
+            "from_node_artifact_id": parent_id_int,
+            "to_node_artifact_id": start_id,
+            "relationship": "base_model",
+        })
+
+    # --- Children (direct only) ---
+    all_artifacts = _scan_all_artifacts()
+
     for item in all_artifacts:
         item_parents = item.get("parents", [])
-        if isinstance(item_parents, list):
-            # Check if this item has artifact_id as a parent
-            item_id = item.get("id")
-            normalized_item_id = _normalize_id_for_comparison(item_id)
-            
-            for p in item_parents:
-                if _normalize_id_for_comparison(p) == normalized_start_id:
-                    # Add child node BEFORE adding edge (ensures node exists)
-                    # Returns the stored artifact_id
-                    child_id_stored = add_node(item_id, item)
-                    
-                    edges.append({
-                        "from_node_artifact_id": start_artifact_id,  # Use exact ID from node
-                        "to_node_artifact_id": child_id_stored,  # Use exact ID from node
-                        "relationship": "parent"
-                    })
-                    # Recurse down to get child's children
-                    walk_down(item_id)
-                    break
-    
-    # Ensure graph consistency: all edges reference existing nodes
-    node_ids = {_normalize_id_for_comparison(n["artifact_id"]) for n in nodes.values()}
-    valid_edges = []
-    for edge in edges:
-        from_id = _normalize_id_for_comparison(edge["from_node_artifact_id"])
-        to_id = _normalize_id_for_comparison(edge["to_node_artifact_id"])
-        if from_id in node_ids and to_id in node_ids:
-            valid_edges.append(edge)
-        else:
-            logger.warning(f"Skipping edge with missing node: {edge}")
-    
-    return {
-        "nodes": list(nodes.values()),
-        "edges": valid_edges
-    }
+        if not isinstance(item_parents, list):
+            continue
 
+        try:
+            item_id_int = int(item["id"])
+        except Exception:
+            continue
+
+        if start_id in [int(p) for p in item_parents if str(p).isdigit()]:
+            if item_id_int not in seen_ids:
+                nodes.append({
+                    "artifact_id": item_id_int,
+                    "name": item.get("filename", str(item_id_int)),
+                    "source": "config_json",
+                })
+                seen_ids.add(item_id_int)
+
+            edges.append({
+                "from_node_artifact_id": start_id,
+                "to_node_artifact_id": item_id_int,
+                "relationship": "base_model",
+            })
+
+    return {"nodes": nodes, "edges": edges}
+
+
+# -----------------------------
+# Route
+# -----------------------------
 
 @app.route("/artifact/<artifact_type>/<artifact_id>/lineage", methods=["GET"])
 def get_lineage(artifact_type: str, artifact_id: str):
-    """
-    GET /artifact/<artifact_type>/<artifact_id>/lineage
-    Get the lineage graph for an artifact, including its parents and children.
-    """
-    # Require authentication
-    _require_auth()
-    
-    # Validate artifact type
+    # ❌ No auth for baseline
+
     if not _valid_type(artifact_type):
         abort(
             400,
@@ -283,9 +157,9 @@ def get_lineage(artifact_type: str, artifact_id: str):
                 "or it is formed improperly, or is invalid."
             ),
         )
-    
-    # Validate artifact ID (minimal validation - treat IDs as opaque)
-    if not artifact_id or not artifact_id.strip():
+
+    # 🔴 Critical: reject malformed IDs BEFORE DynamoDB
+    if not _valid_id(artifact_id):
         abort(
             400,
             description=(
@@ -294,28 +168,15 @@ def get_lineage(artifact_type: str, artifact_id: str):
             ),
         )
 
-    # Verify artifact exists (treat ID as opaque, like download.py does)
     metadata = _fetch_metadata(artifact_type, artifact_id)
-    
-    # Check if metadata is malformed (missing required fields for lineage)
-    # If artifact exists but has no valid structure, return 400
+
     if not isinstance(metadata, dict):
-        abort(400, description="The lineage graph cannot be computed because the artifact metadata is missing or malformed.")
-    
-    # Get all artifacts to build the graph (treat IDs as opaque, no normalization)
-    all_artifacts = _get_all_artifacts()
-    
-    # Build lineage graph (treat IDs as opaque, like download.py does)
-    try:
-        graph = _build_lineage_graph(metadata, artifact_id, all_artifacts)
-    except Exception as e:
-        logger.error(f"Error building lineage graph: {e}", exc_info=True)
-        abort(400, description="The lineage graph cannot be computed because the artifact metadata is missing or malformed.")
-    
-    # Ensure graph has the correct structure
-    if not isinstance(graph, dict) or "nodes" not in graph or "edges" not in graph:
-        abort(400, description="The lineage graph cannot be computed because the artifact metadata is missing or malformed.")
-    
+        abort(
+            400,
+            description="The lineage graph cannot be computed because the artifact metadata is missing or malformed.",
+        )
+
+    graph = _build_lineage_graph(metadata, artifact_id)
     return jsonify(graph), 200
 
 
