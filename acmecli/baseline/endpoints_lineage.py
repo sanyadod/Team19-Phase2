@@ -2,7 +2,7 @@ from flask import Flask, jsonify, abort
 import boto3
 from botocore.exceptions import ClientError
 import logging
-from typing import Dict, List, Any
+from typing import Dict, List, Any, Optional
 
 app = Flask(__name__)
 logger = logging.getLogger(__name__)
@@ -45,6 +45,24 @@ def _fetch_metadata(artifact_type: str, artifact_id: str) -> Dict[str, Any]:
     return item
 
 
+def _fetch_metadata_optional(artifact_type: str, artifact_id: str) -> Optional[Dict[str, Any]]:
+    """Fetch metadata without aborting if artifact doesn't exist. Returns None if not found."""
+    try:
+        resp = META_TABLE.get_item(Key={"id": artifact_id})
+    except ClientError as e:
+        logger.error("DynamoDB get_item failed: %s", e, exc_info=True)
+        return None
+
+    item = resp.get("Item")
+    if not item:
+        return None
+
+    if item.get("artifact_type") != artifact_type:
+        return None
+
+    return item
+
+
 def _scan_all_artifacts() -> List[Dict[str, Any]]:
     try:
         response = META_TABLE.scan()
@@ -72,8 +90,8 @@ def _build_lineage_graph(start_artifact: Dict[str, Any], artifact_id: str) -> Di
     seen_ids = set()
 
     # --- Start node ---
-    start_id = int(start_artifact["id"])
-    start_name = start_artifact.get("filename", str(start_id))
+    start_id = str(start_artifact["id"])
+    start_name = start_artifact.get("filename", start_id)
 
     nodes.append({
         "artifact_id": start_id,
@@ -91,21 +109,28 @@ def _build_lineage_graph(start_artifact: Dict[str, Any], artifact_id: str) -> Di
         )
 
     for parent_id in parents:
-        try:
-            parent_id_int = int(parent_id)
-        except Exception:
+        parent_id_str = str(parent_id)
+        if not parent_id_str or parent_id_str == start_id:
             continue
 
-        if parent_id_int not in seen_ids:
+        # Fetch parent metadata to get proper name
+        parent_artifact = _fetch_metadata_optional("model", parent_id_str)
+        if parent_artifact:
+            parent_name = parent_artifact.get("filename", parent_id_str)
+        else:
+            # If parent doesn't exist, still include it but use ID as name
+            parent_name = parent_id_str
+
+        if parent_id_str not in seen_ids:
             nodes.append({
-                "artifact_id": parent_id_int,
-                "name": str(parent_id_int),
+                "artifact_id": parent_id_str,
+                "name": parent_name,
                 "source": "config_json",
             })
-            seen_ids.add(parent_id_int)
+            seen_ids.add(parent_id_str)
 
         edges.append({
-            "from_node_artifact_id": parent_id_int,
+            "from_node_artifact_id": parent_id_str,
             "to_node_artifact_id": start_id,
             "relationship": "base_model",
         })
@@ -118,23 +143,24 @@ def _build_lineage_graph(start_artifact: Dict[str, Any], artifact_id: str) -> Di
         if not isinstance(item_parents, list):
             continue
 
-        try:
-            item_id_int = int(item["id"])
-        except Exception:
+        item_id_str = str(item.get("id", ""))
+        if not item_id_str or item_id_str == start_id:
             continue
 
-        if start_id in [int(p) for p in item_parents if str(p).isdigit()]:
-            if item_id_int not in seen_ids:
+        # Check if this item has start_id as a parent
+        parent_ids = [str(p) for p in item_parents]
+        if start_id in parent_ids:
+            if item_id_str not in seen_ids:
                 nodes.append({
-                    "artifact_id": item_id_int,
-                    "name": item.get("filename", str(item_id_int)),
+                    "artifact_id": item_id_str,
+                    "name": item.get("filename", item_id_str),
                     "source": "config_json",
                 })
-                seen_ids.add(item_id_int)
+                seen_ids.add(item_id_str)
 
             edges.append({
                 "from_node_artifact_id": start_id,
-                "to_node_artifact_id": item_id_int,
+                "to_node_artifact_id": item_id_str,
                 "relationship": "base_model",
             })
 
@@ -145,18 +171,10 @@ def _build_lineage_graph(start_artifact: Dict[str, Any], artifact_id: str) -> Di
 # Route
 # -----------------------------
 
-@app.route("/artifact/<artifact_type>/<artifact_id>/lineage", methods=["GET"])
-def get_lineage(artifact_type: str, artifact_id: str):
+@app.route("/artifact/model/<artifact_id>/lineage", methods=["GET"])
+def get_lineage(artifact_id: str):
     # ❌ No auth for baseline
-
-    if not _valid_type(artifact_type):
-        abort(
-            400,
-            description=(
-                "There is missing field(s) in the artifact_type or artifact_id "
-                "or it is formed improperly, or is invalid."
-            ),
-        )
+    # Route is model-specific per OpenAPI spec: /artifact/model/{id}/lineage
 
     # 🔴 Critical: reject malformed IDs BEFORE DynamoDB
     if not _valid_id(artifact_id):
@@ -168,7 +186,7 @@ def get_lineage(artifact_type: str, artifact_id: str):
             ),
         )
 
-    metadata = _fetch_metadata(artifact_type, artifact_id)
+    metadata = _fetch_metadata("model", artifact_id)
 
     if not isinstance(metadata, dict):
         abort(
