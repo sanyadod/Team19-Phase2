@@ -45,25 +45,11 @@ def _fetch_metadata(artifact_type: str, artifact_id: str) -> Dict[str, Any]:
     return item
 
 
-def _fetch_metadata_optional(artifact_type: str, artifact_id: str) -> Optional[Dict[str, Any]]:
-    """Fetch metadata without aborting if artifact doesn't exist. Returns None if not found."""
-    try:
-        resp = META_TABLE.get_item(Key={"id": artifact_id})
-    except ClientError as e:
-        logger.error("DynamoDB get_item failed: %s", e, exc_info=True)
-        return None
-
-    item = resp.get("Item")
-    if not item:
-        return None
-
-    if item.get("artifact_type") != artifact_type:
-        return None
-
-    return item
-
-
-def _scan_all_artifacts() -> List[Dict[str, Any]]:
+def _scan_all_models() -> Dict[str, Dict[str, Any]]:
+    """
+    Scan DynamoDB once to get all models.
+    Returns a dict mapping model_id -> model_metadata.
+    """
     try:
         response = META_TABLE.scan()
         items = response.get("Items", [])
@@ -74,167 +60,157 @@ def _scan_all_artifacts() -> List[Dict[str, Any]]:
             )
             items.extend(response.get("Items", []))
 
-        return items
+        # Filter to models only and build map
+        models = {}
+        for item in items:
+            if item.get("artifact_type") == "model":
+                model_id = str(item.get("id", ""))
+                if model_id:
+                    models[model_id] = item
+
+        logger.info(f"Scanned {len(items)} total items, found {len(models)} models")
+        return models
     except ClientError as e:
         logger.error("DynamoDB scan failed: %s", e, exc_info=True)
-        return []
+        abort(500, description="The artifact storage encountered an error.")
 
 
-# -----------------------------
-# Lineage builder (BASELINE)
-# -----------------------------
-
-def _build_lineage_graph(start_artifact: Dict[str, Any], artifact_id: str) -> Dict[str, Any]:
-    logger.info("=" * 80)
-    logger.info("BUILDING LINEAGE GRAPH")
-    logger.info("=" * 80)
-    logger.info(f"Requested artifact_id: {artifact_id}")
-    logger.info(f"Start artifact metadata keys: {list(start_artifact.keys())}")
-    logger.info(f"Start artifact id: {start_artifact.get('id')}")
-    logger.info(f"Start artifact type: {start_artifact.get('artifact_type')}")
-    logger.info(f"Start artifact filename: {start_artifact.get('filename')}")
+def _build_parents_and_children_maps(models: Dict[str, Dict[str, Any]]) -> tuple:
+    """
+    Build two maps from all models:
+    - parents_map[child_id] = [parent_id1, parent_id2, ...]
+    - children_map[parent_id] = [child_id1, child_id2, ...]
     
-    nodes: List[Dict[str, Any]] = []
-    edges: List[Dict[str, Any]] = []
-    seen_ids = set()
-
-    # --- Start node ---
-    start_id = str(start_artifact["id"])
-    start_name = start_artifact.get("filename", start_id)
+    Only includes parent IDs that exist in the models dict.
+    """
+    parents_map: Dict[str, List[str]] = {}
+    children_map: Dict[str, List[str]] = {}
     
-    logger.info(f"Start node - id: {start_id}, name: {start_name}")
-
-    nodes.append({
-        "artifact_id": start_id,
-        "name": start_name,
-        "source": "config_json",
-    })
-    seen_ids.add(start_id)
-
-    # --- Parents (direct only) ---
-    parents = start_artifact.get("parents", [])
-    logger.info(f"Parents from metadata: {parents} (type: {type(parents)})")
-    
-    if not isinstance(parents, list):
-        logger.error(f"Parents is not a list! Type: {type(parents)}, Value: {parents}")
-        abort(
-            400,
-            description="The lineage graph cannot be computed because the artifact metadata is missing or malformed.",
-        )
-
-    logger.info(f"Processing {len(parents)} parent(s)")
-    parents_found = 0
-    parents_skipped_not_exist = 0
-    parents_skipped_self = 0
-    
-    for parent_id in parents:
-        parent_id_str = str(parent_id)
-        logger.info(f"  Processing parent: {parent_id_str} (original type: {type(parent_id)})")
+    for model_id, model_data in models.items():
+        parents = model_data.get("parents", [])
         
-        if not parent_id_str or parent_id_str == start_id:
-            logger.info(f"    SKIPPED: parent is empty or same as start_id")
-            parents_skipped_self += 1
+        # Validate parents is a list
+        if parents is not None and not isinstance(parents, list):
+            logger.warning(f"Model {model_id} has invalid parents field (not a list), skipping")
             continue
+        
+        # Build parents_map (child -> parents)
+        valid_parents = []
+        for parent_id in parents:
+            parent_id_str = str(parent_id)
+            # Only include parents that exist in our registry
+            if parent_id_str and parent_id_str in models:
+                valid_parents.append(parent_id_str)
+                # Build children_map (parent -> children)
+                if parent_id_str not in children_map:
+                    children_map[parent_id_str] = []
+                children_map[parent_id_str].append(model_id)
+        
+        if valid_parents:
+            parents_map[model_id] = valid_parents
+    
+    logger.info(f"Built maps: {len(parents_map)} models with parents, {len(children_map)} models with children")
+    return parents_map, children_map
 
-        # Fetch parent metadata to get proper name
-        # CRITICAL: Only include parents that exist in the system
-        # "Lineage only includes data available from the models currently uploaded to the system"
-        logger.info(f"    Fetching parent metadata for: {parent_id_str}")
-        parent_artifact = _fetch_metadata_optional("model", parent_id_str)
-        if not parent_artifact:
-            logger.info(f"    SKIPPED: Parent {parent_id_str} does not exist in system")
-            parents_skipped_not_exist += 1
+
+def _find_ancestors(start_id: str, parents_map: Dict[str, List[str]]) -> set:
+    """
+    Use BFS to find all ancestors (parents, grandparents, etc.) of start_id.
+    """
+    ancestors = set()
+    queue = [start_id]
+    visited = set()
+    
+    while queue:
+        current_id = queue.pop(0)
+        if current_id in visited:
             continue
+        visited.add(current_id)
+        
+        # Get parents of current node
+        parents = parents_map.get(current_id, [])
+        for parent_id in parents:
+            if parent_id not in visited and parent_id not in ancestors:
+                ancestors.add(parent_id)
+                queue.append(parent_id)
+    
+    logger.info(f"Found {len(ancestors)} ancestors for {start_id}")
+    return ancestors
 
-        parent_name = parent_artifact.get("filename", parent_id_str)
-        logger.info(f"    FOUND: Parent {parent_id_str} -> name: {parent_name}")
 
-        if parent_id_str not in seen_ids:
-            nodes.append({
-                "artifact_id": parent_id_str,
-                "name": parent_name,
-                "source": "config_json",
-            })
-            seen_ids.add(parent_id_str)
-            logger.info(f"    Added parent node: {parent_id_str}")
+def _find_descendants(start_id: str, children_map: Dict[str, List[str]]) -> set:
+    """
+    Use BFS to find all descendants (children, grandchildren, etc.) of start_id.
+    """
+    descendants = set()
+    queue = [start_id]
+    visited = set()
+    
+    while queue:
+        current_id = queue.pop(0)
+        if current_id in visited:
+            continue
+        visited.add(current_id)
+        
+        # Get children of current node
+        children = children_map.get(current_id, [])
+        for child_id in children:
+            if child_id not in visited and child_id not in descendants:
+                descendants.add(child_id)
+                queue.append(child_id)
+    
+    logger.info(f"Found {len(descendants)} descendants for {start_id}")
+    return descendants
 
-        edges.append({
-            "from_node_artifact_id": parent_id_str,
-            "to_node_artifact_id": start_id,
-            "relationship": "base_model",
+
+def _build_lineage_graph(start_id: str, models: Dict[str, Dict[str, Any]], 
+                         parents_map: Dict[str, List[str]], 
+                         children_map: Dict[str, List[str]]) -> Dict[str, Any]:
+    """
+    Build the full transitive lineage graph for start_id.
+    """
+    logger.info("=" * 80)
+    logger.info(f"BUILDING LINEAGE GRAPH for {start_id}")
+    logger.info("=" * 80)
+    
+    # Find all ancestors and descendants
+    ancestors = _find_ancestors(start_id, parents_map)
+    descendants = _find_descendants(start_id, children_map)
+    
+    # Final node set: start + ancestors + descendants
+    all_node_ids = {start_id} | ancestors | descendants
+    logger.info(f"Total nodes in lineage: {len(all_node_ids)} (start: 1, ancestors: {len(ancestors)}, descendants: {len(descendants)})")
+    
+    # Build nodes list
+    nodes = []
+    for node_id in sorted(all_node_ids):  # Sort for consistent output
+        model_data = models.get(node_id, {})
+        node_name = model_data.get("filename", node_id)
+        nodes.append({
+            "artifact_id": node_id,
+            "name": node_name,
+            "source": "config_json",
         })
-        logger.info(f"    Added edge: {parent_id_str} -> {start_id}")
-        parents_found += 1
     
-    logger.info(f"Parents summary: found={parents_found}, skipped_not_exist={parents_skipped_not_exist}, skipped_self={parents_skipped_self}")
-
-    # --- Children (direct only) ---
-    # Lineage is ONLY between models, not datasets or code artifacts
-    logger.info("Scanning for children...")
-    all_artifacts = _scan_all_artifacts()
-    logger.info(f"Total artifacts scanned: {len(all_artifacts)}")
+    # Build edges: all parent->child relationships where BOTH endpoints are in all_node_ids
+    edges = []
+    edge_set = set()  # For deduplication
     
-    children_found = 0
-    children_skipped_not_model = 0
-    children_skipped_no_parents = 0
-    children_skipped_not_child = 0
+    for child_id in all_node_ids:
+        parents = parents_map.get(child_id, [])
+        for parent_id in parents:
+            # Only include edge if parent is also in our node set
+            if parent_id in all_node_ids:
+                edge_key = (parent_id, child_id)
+                if edge_key not in edge_set:
+                    edges.append({
+                        "from_node_artifact_id": parent_id,
+                        "to_node_artifact_id": child_id,
+                        "relationship": "base_model",
+                    })
+                    edge_set.add(edge_key)
     
-    for item in all_artifacts:
-        item_type = item.get("artifact_type")
-        item_id_str = str(item.get("id", ""))
-        
-        # CRITICAL: Only include models in lineage graph
-        if item_type != "model":
-            children_skipped_not_model += 1
-            continue
-
-        item_parents = item.get("parents", [])
-        if not isinstance(item_parents, list):
-            logger.info(f"  Item {item_id_str}: parents is not a list, skipping")
-            children_skipped_no_parents += 1
-            continue
-
-        if not item_id_str or item_id_str == start_id:
-            continue
-
-        # Check if this item has start_id as a parent
-        parent_ids = [str(p) for p in item_parents]
-        logger.info(f"  Checking item {item_id_str} (parents: {parent_ids})")
-        
-        if start_id in parent_ids:
-            logger.info(f"    FOUND CHILD: {item_id_str} has {start_id} as parent")
-            if item_id_str not in seen_ids:
-                nodes.append({
-                    "artifact_id": item_id_str,
-                    "name": item.get("filename", item_id_str),
-                    "source": "config_json",
-                })
-                seen_ids.add(item_id_str)
-                logger.info(f"    Added child node: {item_id_str}")
-
-            edges.append({
-                "from_node_artifact_id": start_id,
-                "to_node_artifact_id": item_id_str,
-                "relationship": "base_model",
-            })
-            logger.info(f"    Added edge: {start_id} -> {item_id_str}")
-            children_found += 1
-        else:
-            children_skipped_not_child += 1
-    
-    logger.info(f"Children summary: found={children_found}, skipped_not_model={children_skipped_not_model}, skipped_no_parents={children_skipped_no_parents}, skipped_not_child={children_skipped_not_child}")
-
-    logger.info("=" * 80)
-    logger.info("FINAL LINEAGE GRAPH")
-    logger.info("=" * 80)
-    logger.info(f"Total nodes: {len(nodes)}")
-    for i, node in enumerate(nodes):
-        logger.info(f"  Node {i+1}: artifact_id={node.get('artifact_id')}, name={node.get('name')}, source={node.get('source')}")
-    
-    logger.info(f"Total edges: {len(edges)}")
-    for i, edge in enumerate(edges):
-        logger.info(f"  Edge {i+1}: {edge.get('from_node_artifact_id')} -> {edge.get('to_node_artifact_id')} ({edge.get('relationship')})")
-    
+    logger.info(f"Created {len(nodes)} nodes and {len(edges)} edges")
     logger.info("=" * 80)
     
     return {"nodes": nodes, "edges": edges}
@@ -250,11 +226,10 @@ def get_lineage(artifact_id: str):
     # Route is model-specific per OpenAPI spec: /artifact/model/{id}/lineage
     
     logger.info("=" * 80)
-    logger.info("LINEAGE ENDPOINT CALLED")
+    logger.info(f"LINEAGE ENDPOINT CALLED for artifact_id: {artifact_id}")
     logger.info("=" * 80)
-    logger.info(f"Requested artifact_id: {artifact_id}")
 
-    # 🔴 Critical: reject malformed IDs BEFORE DynamoDB
+    # Validate artifact_id format
     if not _valid_id(artifact_id):
         logger.error(f"Invalid artifact_id format: {artifact_id}")
         abort(
@@ -265,18 +240,34 @@ def get_lineage(artifact_id: str):
             ),
         )
 
-    logger.info(f"Fetching metadata for model: {artifact_id}")
-    metadata = _fetch_metadata("model", artifact_id)
-    logger.info(f"Metadata retrieved. Keys: {list(metadata.keys()) if isinstance(metadata, dict) else 'NOT A DICT'}")
-
-    if not isinstance(metadata, dict):
-        logger.error(f"Metadata is not a dict! Type: {type(metadata)}, Value: {metadata}")
+    # Do ONE scan to get all models
+    logger.info("Scanning DynamoDB for all models...")
+    models = _scan_all_models()
+    
+    # Check if start model exists
+    start_id = artifact_id
+    if start_id not in models:
+        logger.error(f"Model {start_id} not found in registry")
+        abort(404, description="Artifact does not exist.")
+    
+    start_model = models[start_id]
+    
+    # Validate parents field if it exists
+    parents = start_model.get("parents")
+    if parents is not None and not isinstance(parents, list):
+        logger.error(f"Model {start_id} has invalid parents field: {type(parents)}")
         abort(
             400,
             description="The lineage graph cannot be computed because the artifact metadata is missing or malformed.",
         )
-
-    graph = _build_lineage_graph(metadata, artifact_id)
+    
+    # Build parent/child maps
+    logger.info("Building parent/child relationship maps...")
+    parents_map, children_map = _build_parents_and_children_maps(models)
+    
+    # Build lineage graph
+    graph = _build_lineage_graph(start_id, models, parents_map, children_map)
+    
     logger.info("Returning lineage graph")
     return jsonify(graph), 200
 
