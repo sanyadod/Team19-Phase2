@@ -96,6 +96,7 @@ acmecli/
     hf_api.py         # Metrics from Hugging Face API (stub for now)
 tests/
   test_smoke.py       # starter unit tests
+  test_streamlit_ui.py  # Selenium browser tests for Streamlit UI
 test_artifacts/        # Test-generated files (ignored by Git)
   README.md           # Documentation of test artifacts
   *.jsonl             # NDJSON test results and data files
@@ -161,6 +162,41 @@ NetScore = 0.20*License + 0.20*DatasetAndCode + 0.15*CodeQuality
 - Current tests: basic smoke tests for all metrics
 - Coverage target: **≥80%** before final delivery
 - Plan: expand with more unit + integration tests in Milestone 3
+
+### Selenium UI Tests
+
+The project includes automated browser tests for the Streamlit frontend using Selenium:
+
+**Running Selenium Tests:**
+```bash
+# Run all Selenium tests
+make test-selenium
+# or
+pytest tests/test_streamlit_ui.py -v
+
+# Run with visible browser (for debugging)
+HEADLESS=false pytest tests/test_streamlit_ui.py -v
+
+# Skip Selenium tests when running all tests
+pytest -m "not selenium"
+```
+
+**Test Coverage:**
+- Home page rendering and navigation
+- Upload page form validation
+- Download, Search, Lineage, Cost, License, Rate pages
+- Sidebar navigation and page switching
+- Backend URL configuration
+
+**Requirements:**
+- Chrome/Chromium browser installed
+- ChromeDriver (automatically managed by `webdriver-manager`)
+- Streamlit installed and available in PATH
+
+**Test Infrastructure:**
+- Automatically starts Streamlit server on port 8502 for testing
+- Uses headless Chrome by default (set `HEADLESS=false` to see browser)
+- Cleans up server process after tests complete
 
 ### Test Artifacts Directory
 
