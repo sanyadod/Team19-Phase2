@@ -1,0 +1,168 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [ main ]
+  push:
+    branches: [ main ]
+
+jobs:
+  lint:
+    name: Code Quality Checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install .[dev]
+
+      - name: Check code formatting with Black
+        run: |
+          python -m black --check .
+
+      - name: Check import sorting with isort
+        run: |
+          python -m isort --check-only .
+
+      - name: Run flake8 linter
+        run: |
+          flake8
+
+  type-check:
+    name: Type Checking
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install .[dev]
+
+      - name: Run mypy type checker
+        run: |
+          mypy acmecli
+
+  test:
+    name: Unit Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install .[dev]
+
+      - name: Run pytest (excluding Selenium tests)
+        run: |
+          pytest -q -m "not selenium"
+
+  coverage:
+    name: Test Coverage
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install .[dev]
+
+      - name: Run tests with coverage
+        run: |
+          coverage run -m pytest -q -m "not selenium"
+
+      - name: Generate coverage report
+        run: |
+          coverage report -m
+
+      - name: Check coverage threshold
+        run: |
+          coverage report --fail-under=80
+
+  flask-build:
+    name: Flask Application Build Validation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install .[dev]
+
+      - name: Validate Flask app imports
+        run: |
+          python -c "from acmecli.baseline.backend import app; print('Flask app imported successfully')"
+
+      - name: Check Flask routes registration
+        run: |
+          python -c "from acmecli.baseline.backend import app; routes = [str(r) for r in app.url_map.iter_rules()]; print(f'Registered {len(routes)} routes'); assert len(routes) > 0, 'No routes registered'"
+
+  selenium-tests:
+    name: UI Integration Tests (Selenium)
+    runs-on: ubuntu-latest
+    # Only run on main branch pushes to save CI resources
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install .[dev]
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y wget gnupg
+
+      - name: Install Google Chrome
+        run: |
+          wget -q -O - https://dl.google.com/linux/linux_signing_key.pub | sudo apt-key add -
+          echo "deb [arch=amd64] http://dl.google.com/linux/chrome/deb/ stable main" | sudo tee /etc/apt/sources.list.d/google-chrome.list
+          sudo apt-get update
+          sudo apt-get install -y google-chrome-stable
+
+      - name: Run Selenium tests
+        run: |
+          pytest tests/test_streamlit_ui.py -v -m selenium
