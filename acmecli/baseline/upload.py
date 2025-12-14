@@ -4,7 +4,8 @@ import json
 import time
 import hashlib
 import zipfile
-from typing import Dict, Any, Optional
+import logging
+from typing import Dict, Any, Optional, List
 from urllib.parse import urlparse
 
 from flask import Flask, request, jsonify, abort
@@ -14,6 +15,7 @@ import requests
 from boto3.dynamodb.conditions import Attr
 
 app = Flask(__name__)
+logger = logging.getLogger(__name__)
 
 # --- CONFIG ---
 S3_BUCKET_DEFAULT = "ece-registry"
@@ -28,6 +30,12 @@ VALID_TYPES = {"model", "dataset", "code"}
 
 def _valid_type(artifact_type: str) -> bool:
     return artifact_type in VALID_TYPES
+
+def _valid_id(artifact_id: str) -> bool:
+    """Validate artifact ID format."""
+    if not artifact_id:
+        return False
+    return all(c.isalnum() or c in "-._" for c in artifact_id)
 
 
 def _generate_artifact_id() -> str:
@@ -111,6 +119,68 @@ def _artifact_exists_by_source(artifact_type: str, url: str) -> bool:
         abort(500, description="The artifact storage encountered an error.")
 
 
+def _validate_and_normalize_parents(parents_input: Any, artifact_type: str) -> List[str]:
+    """
+    Validate and normalize parents field from request.
+    Returns validated list of parent IDs that exist in DynamoDB as models.
+    """
+    # Log raw input
+    logger.warning("Raw parents input: %s (type: %s)", parents_input, type(parents_input).__name__)
+    
+    # Normalize to list: handle single string, list, or None
+    if parents_input is None:
+        return []
+    
+    if isinstance(parents_input, str):
+        # Single string: convert to list
+        parents_list = [parents_input.strip()] if parents_input.strip() else []
+    elif isinstance(parents_input, list):
+        parents_list = [str(p).strip() for p in parents_input if p]
+    else:
+        abort(400, description="Invalid 'parents' field: must be a list of strings or a single string.")
+    
+    if not parents_list:
+        logger.warning("Validated parents list: [] (empty or all empty strings)")
+        return []
+    
+    # Validate each parent ID format
+    invalid_format = []
+    for parent_id in parents_list:
+        if not _valid_id(parent_id):
+            invalid_format.append(parent_id)
+    
+    if invalid_format:
+        abort(400, description=f"Invalid parent ID format(s): {invalid_format}. Parent IDs must contain only alphanumeric characters, hyphens, dots, and underscores.")
+    
+    # Validate that each parent exists in DynamoDB as a model
+    validated_parents = []
+    missing_parents = []
+    
+    for parent_id in parents_list:
+        try:
+            resp = META_TABLE.get_item(Key={"id": parent_id})
+            item = resp.get("Item")
+            
+            if not item:
+                missing_parents.append(parent_id)
+            elif item.get("artifact_type") != "model":
+                missing_parents.append(parent_id)
+                logger.warning("Parent ID %s exists but is not a model (type: %s)", 
+                             parent_id, item.get("artifact_type"))
+            else:
+                validated_parents.append(parent_id)
+        except ClientError as e:
+            # Treat DynamoDB errors as server errors
+            logger.error("DynamoDB error checking parent ID %s: %s", parent_id, e)
+            abort(500, description="The artifact storage encountered an error.")
+    
+    if missing_parents:
+        abort(400, description=f"Parent ID(s) not found in registry as models: {missing_parents}")
+    
+    logger.warning("Validated parents list stored: %s", validated_parents)
+    return validated_parents
+
+
 @app.post("/artifact/<artifact_type>")
 def create_artifact(artifact_type: str):
     """
@@ -183,7 +253,7 @@ def create_artifact(artifact_type: str):
     if _artifact_exists_by_source(artifact_type, source_url):
         abort(409, description="Artifact exists already.")
 
-        # Generate unique artifact ID
+    # Generate unique artifact ID
     artifact_id = _generate_artifact_id()
 
     # Use provided name if available, otherwise extract from URL
@@ -195,19 +265,16 @@ def create_artifact(artifact_type: str):
         # Extract human-readable name from URL
         artifact_name = _extract_name_from_url(source_url)
 
-    '''
-    # Generate unique artifact ID
-    artifact_id = _generate_artifact_id()
-
-    # Extract human-readable name from URL
-    artifact_name = _extract_name_from_url(source_url)
-    '''
-
     # S3 key: keep artifacts organized by type
     s3_key = f"{artifact_type}/{artifact_id}.zip"
 
     # Download and store in S3
     size_bytes, sha256 = _download_and_store(source_url, s3_key)
+
+    # Validate and normalize parents field (only for models)
+    validated_parents = []
+    if artifact_type == "model" and "parents" in payload:
+        validated_parents = _validate_and_normalize_parents(payload.get("parents"), artifact_type)
 
     # Write metadata to DynamoDB
     db_item = {
@@ -220,6 +287,10 @@ def create_artifact(artifact_type: str):
         "size_bytes": size_bytes,
         "sha256": sha256,
     }
+    
+    # Add parents field if validated (only for models)
+    if artifact_type == "model" and validated_parents:
+        db_item["parents"] = validated_parents
     
     try:
         META_TABLE.put_item(Item=db_item)
