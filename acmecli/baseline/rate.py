@@ -3,6 +3,7 @@ from botocore.exceptions import ClientError, NoCredentialsError
 from flask_cors import CORS
 import boto3
 from botocore.exceptions import ClientError, NoCredentialsError
+import math
 
 DYNAMODB = boto3.resource("dynamodb", region_name="us-east-1")
 META_TABLE = DYNAMODB.Table("artifact")
@@ -19,6 +20,16 @@ from acmecli.metrics.hf_api import (
     freshness_days_since_update,
 )
 
+from acmecli.metrics.repo_scan import (
+    license_score,
+    rampup_score,
+    bus_factor_score,
+    dataset_and_code_score,
+    dataset_quality_score,
+    code_quality_score,
+    perf_claims_score,
+)
+
 app = Flask(__name__)
 CORS(app)
 
@@ -32,87 +43,80 @@ def _score_from_context(name: str, context: dict) -> dict:
 
     lat = context.get("latencies", {})
 
-    # ----- Core scores (placeholder mapping) -----
-    # You probably already have a module that does this more precisely.
-    # If so, REPLACE these with calls into that module.
-
-    # Size (bytes -> 0..1 for each hardware tier)
-    total_bytes = float(context.get("total_bytes", 50_000_000))
-    total_mb = total_bytes / (1024 * 1024)
-
-    def size_score_for(max_mb: float) -> float:
-        # 1.0 if <= 10% of tier, 0.0 if >= tier, linear in between
-        if total_mb >= max_mb:
-            return 0.0
-        if total_mb <= 0.1 * max_mb:
-            return 1.0
-        return max(0.0, min(1.0, 1 - (total_mb - 0.1 * max_mb) / (0.9 * max_mb)))
-
-    size_score = {
-        "raspberry_pi": size_score_for(500),    # 500 MB
-        "jetson_nano": size_score_for(2000),   # 2 GB
-        "desktop_pc":  size_score_for(8000),   # 8 GB
-        "aws_server":  size_score_for(16000),  # 16 GB
+    # ----- Core scores using proper metric functions -----
+    
+    # Size scores using 1/(1+(S/C)^a) formula (from scoring.py)
+    # Make parameters more forgiving to get higher scores for smaller devices
+    total_bytes = int(context.get("total_bytes", 50_000_000))
+    S = max(0.0, float(total_bytes))
+    params = {
+        "raspberry_pi": (200_000_000.0, 1.2),  # More forgiving: higher C, lower a
+        "jetson_nano": (400_000_000.0, 1.2),  # More forgiving: higher C, lower a
+        "desktop_pc": (2_000_000_000.0, 1.8),
+        "aws_server": (4_000_000_000.0, 1.8),
     }
+    size_score = {}
+    for device, (C, a) in params.items():
+        ratio = (S / C) if C > 0 else 0.0
+        score = 1.0 / (1.0 + math.pow(max(0.0, ratio), a))
+        size_score[device] = max(0.0, min(1.0, score))
 
-    # Docs quality -> ramp up time (0..1)
+    # Ramp up time: average of all 5 docs fields (from repo_scan.py)
     docs = context.get("docs", {}) or {}
-    ramp_up_time = float(docs.get("readme", 0.5))
-
-    # License quality from context.license_text (you might have a better mapping)
-    license_text = str(context.get("license_text", "")).lower()
-    if "apache" in license_text:
-        license_score = 1.0
-    elif "mit" in license_text or "bsd" in license_text:
-        license_score = 0.9
-    elif "gpl" in license_text:
-        license_score = 0.4
-    elif license_text:
-        license_score = 0.6
-    else:
-        license_score = 0.3
-
-    # Bus factor from contributors
-    contributors = int(context.get("contributors", 1) or 1)
-    bus_factor = max(0.0, min(1.0, contributors / (contributors + 5.0)))
-
-    # Dataset & code presence
-    dataset_present = bool(context.get("dataset_present"))
-    code_present = bool(context.get("code_present", True))
-    dataset_and_code_score = 0.0
-    if dataset_present:
-        dataset_and_code_score += 0.6
-    if code_present:
-        dataset_and_code_score += 0.4
-
-    # Dataset quality details
-    dataset_doc = context.get("dataset_doc", {}) or {}
-    dataset_quality = float(
-        0.25 * dataset_doc.get("source", 0.0) +
-        0.25 * dataset_doc.get("license", 0.0) +
-        0.25 * dataset_doc.get("splits", 0.0) +
-        0.25 * dataset_doc.get("ethics", 0.0)
+    # Ensure we get float values, defaulting to 0.0 if missing
+    ramp_up_time, _ = rampup_score(
+        float(docs.get("readme", 0.0) or 0.0),
+        float(docs.get("quickstart", 0.0) or 0.0),
+        float(docs.get("tutorials", 0.0) or 0.0),
+        float(docs.get("api_docs", 0.0) or 0.0),
+        float(docs.get("reproducibility", 0.0) or 0.0),
     )
 
-    # Code quality heuristics
-    flake8_errors = int(context.get("flake8_errors", 10) or 10)
-    mypy_errors = int(context.get("mypy_errors", 5) or 5)
+    # License score using proper function (from repo_scan.py)
+    license_score_val, _ = license_score(context.get("license_text", ""))
+
+    # Bus factor using proper function (from repo_scan.py)
+    # Ensure we get a reasonable contributor count (default to at least 1)
+    contributors_raw = context.get("contributors")
+    if contributors_raw is None:
+        contributors = 1
+    else:
+        try:
+            contributors = int(contributors_raw)
+        except (TypeError, ValueError):
+            contributors = 1
+    contributors = max(1, contributors)  # Ensure at least 1
+    bus_factor, _ = bus_factor_score(contributors)
+
+    # Dataset & code score using proper function (from repo_scan.py)
+    # Ensure proper boolean extraction
+    dataset_present = bool(context.get("dataset_present", False))
+    code_present_raw = context.get("code_present")
+    # Default to True if not specified (most models have code)
+    code_present = bool(code_present_raw if code_present_raw is not None else True)
+    dataset_and_code_score, _ = dataset_and_code_score(dataset_present, code_present)
+
+    # Dataset quality using proper function (from repo_scan.py)
+    dataset_doc = context.get("dataset_doc", {}) or {}
+    dataset_quality, _ = dataset_quality_score(
+        dataset_doc.get("source", 0.0),
+        dataset_doc.get("license", 0.0),
+        dataset_doc.get("splits", 0.0),
+        dataset_doc.get("ethics", 0.0),
+    )
+
+    # Code quality using proper function (from repo_scan.py)
+    flake8_errors = int(context.get("flake8_errors", 0) or 0)
+    mypy_errors = int(context.get("mypy_errors", 0) or 0)
     isort_sorted = bool(context.get("isort_sorted", False))
+    code_quality, _ = code_quality_score(flake8_errors, isort_sorted, mypy_errors)
 
-    code_quality = 1.0
-    code_quality -= min(0.7, flake8_errors * 0.03)
-    code_quality -= min(0.3, mypy_errors * 0.03)
-    if not isort_sorted:
-        code_quality -= 0.05
-    code_quality = max(0.0, min(1.0, code_quality))
-
-    # Performance claims: benchmarks + citations
+    # Performance claims using proper function (from repo_scan.py)
     perf = context.get("perf", {}) or {}
-    perf_claims = 0.0
-    if perf.get("benchmarks"):
-        perf_claims += 0.6
-    if perf.get("citations"):
-        perf_claims += 0.4
+    # Ensure we properly detect benchmarks and citations
+    benchmarks = bool(perf.get("benchmarks", False))
+    citations = bool(perf.get("citations", False))
+    perf_claims, _ = perf_claims_score(benchmarks, citations)
 
     # Reproducibility & reviewedness – temporary simple values
     reproducibility = 0.0   # You can improve using docs/HF metadata or GitHub later
@@ -123,7 +127,7 @@ def _score_from_context(name: str, context: dict) -> dict:
 
     # ----- Net score (same formula as compute_netscore) -----
     net_score = (
-        0.20 * license_score +
+        0.20 * license_score_val +
         0.20 * dataset_and_code_score +
         0.15 * code_quality +
         0.15 * ramp_up_time +
@@ -182,7 +186,7 @@ def _score_from_context(name: str, context: dict) -> dict:
         "bus_factor_latency": float(bus_latency),
         "performance_claims": float(perf_claims),
         "performance_claims_latency": float(perf_latency),
-        "license": float(license_score),
+        "license": float(license_score_val),
         "license_latency": float(license_latency),
         "dataset_and_code_score": float(dataset_and_code_score),
         "dataset_and_code_score_latency": float(dac_latency),
@@ -302,6 +306,3 @@ def model_artifact_rate(model_id: str):
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5001, debug=True)
-
-
-
