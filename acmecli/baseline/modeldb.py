@@ -10,7 +10,6 @@ logger = logging.getLogger(__name__)
 AWS_REGION = "us-east-1"
 DYNAMODB = boto3.resource("dynamodb", region_name=AWS_REGION)
 
-# Re-use the same table name as download/cost/reset
 MODEL_TABLE = DYNAMODB.Table("artifact")
 
 PHASE1_FIELDS = [
@@ -123,7 +122,7 @@ def put_model_from_phase1(obj: Dict[str, Any]) -> None:
     model_id = obj["id"]
     version = obj.get("version", "0.0.0")
 
-    # If JSON does not include net_score, compute it here
+    # If JSON does not include net_score, compute here
     if "net_score" not in obj:
         obj["net_score"] = compute_netscore(obj)
 

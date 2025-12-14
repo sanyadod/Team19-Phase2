@@ -12,7 +12,7 @@ import streamlit as st
 from botocore.exceptions import ClientError
 
 # ---- S3 config ----
-S3_BUCKET = "ece-registry"  # override via st.secrets / env if desired
+S3_BUCKET = "ece-registry"
 AWS_REGION = "us-east-1"
 
 s3_client = boto3.client("s3", region_name=AWS_REGION)
@@ -94,23 +94,21 @@ def _safe_zip_check(blob: bytes, *, max_uncompressed_bytes: int = 200 * 1024 * 1
                 )
 
 
-# ---- Page config ----
 st.set_page_config(page_title="Artifact Registry", page_icon="📦", layout="centered")
 
 st.title("Artifact Registry")
 st.write("Upload, download, and manage artifacts in the registry.")
 
-# Backend base URL (Flask server)
 DEFAULT_BACKEND = "http://127.0.0.1:5001"
 backend_url = st.text_input("Backend URL", value=DEFAULT_BACKEND)
 
-# ---- Upload UI (Create) ----
+# upload UI
 st.divider()
 st.header("📤 Upload Artifact")
 
 st.write("Upload an artifact file. Select the category to determine which folder it will be stored in (model/, dataset/, or code/).")
 
-# Category selection - determines which folder (model/, dataset/, or code/)
+# Category selection - model/, dataset/, or code/
 upload_artifact_type = st.selectbox(
     "Artifact Category", 
     options=VALID_TYPES, 
@@ -148,7 +146,7 @@ if st.button("Upload Artifact", type="primary", key="upload_btn"):
             # Generate artifact ID (timestamp-based, matching upload.py)
             artifact_id = str(int(time.time() * 1000))
             
-            # Extract name from filename if not provided
+            # Extract name from filename if needed
             if not artifact_name or not artifact_name.strip():
                 filename = uploaded_file.name
                 artifact_name = filename.rsplit(".", 1)[0] if "." in filename else filename
@@ -205,7 +203,7 @@ if st.button("Upload Artifact", type="primary", key="upload_btn"):
         except Exception as ex:
             st.error(f"❌ Unexpected error: {ex}")
 
-# ---- Download UI ----
+# download UI
 st.divider()
 st.header("⬇️ Download Artifact")
 
@@ -242,7 +240,7 @@ if st.button("Download from server", type="primary"):
                     
                     if not presigned_url:
                         st.error("No download URL found in server response.")
-                        st.json(data)  # Show full response for debugging
+                        st.json(data)
                     else:
                         # Download from presigned URL
                         with st.spinner("Downloading file from S3..."):
@@ -290,7 +288,7 @@ with st.expander("Tips"):
         "- The app uses the `/artifacts/<type>/<id>` endpoint which returns a presigned S3 URL for download."
     )
 
-# ---- Cost UI ----
+# cost UI
 st.divider()
 st.header("💰 Artifact Cost Calculator")
 
@@ -320,7 +318,7 @@ if st.button("Calculate Cost", type="primary", key="cost_btn"):
         
         with st.spinner("Calculating cost..."):
             try:
-                # Send default token (backend requires X-Authorization header)
+                # Send default token
                 headers = {"X-Authorization": "baseline"}
                 resp = requests.get(url, headers=headers, timeout=60)
                 
@@ -361,7 +359,7 @@ if st.button("Calculate Cost", type="primary", key="cost_btn"):
                 st.error(f"Unexpected error: {ex}")
 
 
-# ---- Reset Registry UI ----
+# reset registry UI
 st.divider()
 st.header("🔄 Reset Registry")
 

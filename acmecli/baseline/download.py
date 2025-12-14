@@ -327,8 +327,6 @@ def get_artifact(artifact_type: str, artifact_id: str):
     BASELINE: Return artifact metadata and a URL + download_url (not raw bytes).
     """
 
-    # _require_auth()   # still disabled
-
     # 400 on bad type/id
     if not _valid_type(artifact_type):
         logger.error(
@@ -361,12 +359,10 @@ def get_artifact(artifact_type: str, artifact_id: str):
     db_artifact_id = meta.get("id", artifact_id)          # <- keep original type
     db_artifact_type = meta.get("artifact_type", artifact_type)
 
-   
-
-    # 🔴 ALWAYS generate a presigned download URL
+    # always generate a presigned download URL
     presigned_url = _generate_presigned_url(bucket, key)
 
-    # 🔴 data MUST contain both url and download_url
+    # data must contain both url and download_url
     data = {
         "url": source_url,
         "download_url": presigned_url,

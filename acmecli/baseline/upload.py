@@ -17,7 +17,6 @@ from boto3.dynamodb.conditions import Attr
 app = Flask(__name__)
 logger = logging.getLogger(__name__)
 
-# --- CONFIG ---
 S3_BUCKET_DEFAULT = "ece-registry"
 AWS_REGION = "us-east-1"
 MAX_UNCOMPRESSED_BYTES = 200 * 1024 * 1024  # 200 MB
@@ -161,7 +160,7 @@ def _artifact_exists_by_source(artifact_type: str, url: str) -> bool:
         else:
             return False
     except ClientError as e:
-        # Treat storage failure as server error, not "no duplicate"
+        # Treat storage failure as server error
         abort(500, description="The artifact storage encountered an error.")
 
 
@@ -286,7 +285,6 @@ def create_artifact(artifact_type: str):
             pass
         abort(500, description="The artifact storage encountered an error.")
 
-    # Response matches YAML spec: data.url contains the source URL
     # Download link is provided via GET /artifacts/{artifact_type}/{id} endpoint
     response_body = {
         "metadata": {

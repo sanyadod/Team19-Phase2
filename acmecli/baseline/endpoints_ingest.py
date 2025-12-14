@@ -2,7 +2,6 @@ from flask import Flask, request, abort, jsonify
 import logging
 import json
 
-# Import your existing upload module
 import acmecli.baseline.upload as upload_module
 
 app = Flask(__name__)
@@ -11,7 +10,7 @@ logger = logging.getLogger(__name__)
 VALID_TYPES = {"model", "dataset", "code"}
 DEFAULT_TYPE = "model"
 
-# Import Phase 1 scoring (if available)
+# Import Phase 1 scoring
 try:
     from acmecli.metrics.hf_api import build_context_from_api
     from acmecli.scoring import compute_all_scores
@@ -56,6 +55,8 @@ def score_model(url: str) -> dict:
 
 
 def check_ingestibility(scores: dict) -> tuple:
+
+    # Metrics that must be >= 0.5
     required_metrics = [
         "license",
         "ramp_up_time",
@@ -130,6 +131,8 @@ def ingest_artifact():
         is_ingestible, reason = check_ingestibility(scores)
         if not is_ingestible:
             abort(400, description=reason)
+        
+        
 
         # Step 3: forward payload to upload module
         upload_payload = {"url": url}
