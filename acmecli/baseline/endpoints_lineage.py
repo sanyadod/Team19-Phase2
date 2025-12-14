@@ -114,12 +114,14 @@ def _build_lineage_graph(start_artifact: Dict[str, Any], artifact_id: str) -> Di
             continue
 
         # Fetch parent metadata to get proper name
+        # CRITICAL: Only include parents that exist in the system
+        # "Lineage only includes data available from the models currently uploaded to the system"
         parent_artifact = _fetch_metadata_optional("model", parent_id_str)
-        if parent_artifact:
-            parent_name = parent_artifact.get("filename", parent_id_str)
-        else:
-            # If parent doesn't exist, still include it but use ID as name
-            parent_name = parent_id_str
+        if not parent_artifact:
+            # Skip parents that don't exist in the system
+            continue
+
+        parent_name = parent_artifact.get("filename", parent_id_str)
 
         if parent_id_str not in seen_ids:
             nodes.append({
@@ -136,9 +138,14 @@ def _build_lineage_graph(start_artifact: Dict[str, Any], artifact_id: str) -> Di
         })
 
     # --- Children (direct only) ---
+    # Lineage is ONLY between models, not datasets or code artifacts
     all_artifacts = _scan_all_artifacts()
 
     for item in all_artifacts:
+        # CRITICAL: Only include models in lineage graph
+        if item.get("artifact_type") != "model":
+            continue
+
         item_parents = item.get("parents", [])
         if not isinstance(item_parents, list):
             continue
