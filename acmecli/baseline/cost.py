@@ -63,7 +63,7 @@ def _find_s3_key_and_size(artifact_type: str, artifact_id: str):
     meta = _fetch_metadata(artifact_type, artifact_id)
 
     bucket = meta.get("s3_bucket", S3_BUCKET_DEFAULT)
-    key = meta["s3_key"]  # e.g. "model/bert.zip"
+    key = meta["s3_key"] 
 
     try:
         head = s3_client.head_object(Bucket=bucket, Key=key)
@@ -74,7 +74,7 @@ def _find_s3_key_and_size(artifact_type: str, artifact_id: str):
         abort(500, description="The artifact cost calculator encountered an error.")
 
     content_length = head.get("ContentLength", 0)
-    # Ensure ContentLength is converted to int (handles cases where it might be Unset or other types)
+    # Ensure ContentLength is converted to int
     size_bytes = int(content_length) if content_length is not None else 0
     
     if size_bytes <= 0:

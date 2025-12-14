@@ -103,10 +103,8 @@ def safe_regex_match(pattern: str, text: str, timeout: int = REGEX_TIMEOUT_SECON
             raise value
         return value
     
-    # If queue is empty, process completed but didn't put result (shouldn't happen)
-    # Return False (no match)
+    # If we get here, something went wrong
     return False
-
 
 
 def search_artifacts_internal(regex_str: str, offset: int = 0):
@@ -124,41 +122,55 @@ def search_artifacts_internal(regex_str: str, offset: int = 0):
         response = META_TABLE.scan(ExclusiveStartKey=response["LastEvaluatedKey"])
         all_items.extend(response.get("Items", []))
 
-    # ✅ 5. Try matching — DO NOT abort if no matches
+            # ✅ 5. Try matching — DO NOT abort if no matches
     results = []
     for item in all_items:
-        # Get fields to search - check each field individually
-        fields_to_search = [
-            str(item.get('filename', '') or ''),
-            str(item.get('artifact_type', '') or ''),
-            str(item.get('source_url', '') or '')
-        ]
+     
+        searchable_parts = []
         
-        matched = False
+        # Add artifact name
+        filename = item.get("filename", "")
+        if filename:
+            searchable_parts.append(filename)
+        
+        # Fetch and add README content if source_url is a HuggingFace URL
+        source_url = item.get("source_url", "")
+        if source_url and "huggingface.co/" in source_url:
+            try:
+                from acmecli.metrics.hf_api import extract_model_id, fetch_readme_content
+                model_id = extract_model_id(source_url)
+                readme_content = fetch_readme_content(model_id)
+                if readme_content:
+                    searchable_parts.append(readme_content)
+            except Exception as e:
+                logger.warning(f"Failed to fetch README for {source_url}: {e}")
+        
+        # Also include other string fields for completeness
+        for key, value in item.items():
+            if isinstance(value, str) and key not in ("filename", "source_url"):
+                searchable_parts.append(value)
+        
+        searchable = " ".join(searchable_parts)
+
+
         try:
-            # Check if regex matches ANY of the fields
-            for field_value in fields_to_search:
-                if safe_regex_match(regex_str, field_value):
-                    matched = True
-                    break
+            if safe_regex_match(regex_str, searchable):
+                # Convert ID to int if possible, otherwise keep as string
+                artifact_id = item.get("id")
+                try:
+                    artifact_id = int(artifact_id)
+                except (TypeError, ValueError):
+                    pass
+                
+                results.append({
+                    "name": item.get("filename", ""),
+                    "id": artifact_id,
+                    "type": item.get("artifact_type", "")
+                })
         except TimeoutError:
             abort(400, description="Regex pattern caused timeout (potential ReDoS)")
         except ValueError as e:
             abort(400, description=str(e))
-        
-        if matched:
-            # Convert ID to int if possible, otherwise keep as string
-            artifact_id = item.get("id")
-            try:
-                artifact_id = int(artifact_id)
-            except (TypeError, ValueError):
-                pass
-            
-            results.append({
-                "name": item.get("filename", ""),
-                "id": artifact_id,
-                "type": item.get("artifact_type", "")
-            })
 
     # ✅ 6. Deduplicate
     seen = set()
@@ -168,19 +180,22 @@ def search_artifacts_internal(regex_str: str, offset: int = 0):
             seen.add(r["id"])
             unique_results.append(r)
 
-    # ✅ 7. Pagination (EMPTY LIST IS OK)
+    # ✅ 7. Check if no results found - return 404 per spec
+    if len(unique_results) == 0:
+        abort(404, description="No artifact found under this regex.")
+
+    # ✅ 8. Pagination
     total = len(unique_results)
     end_idx = min(offset + MAX_RESULTS_PER_PAGE, total)
     paginated_results = unique_results[offset:end_idx]
 
     next_offset = str(end_idx) if end_idx < total else None
 
-    # ✅ 8. THIS is the line you asked about
+    # ✅ 9. Return results
     response_obj = jsonify(paginated_results)
     if next_offset:
         response_obj.headers.add("offset", next_offset)
 
-    # ✅ MUST ALWAYS REACH HERE — even if paginated_results == []
     return response_obj, 200
 
 

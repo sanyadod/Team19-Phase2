@@ -10,7 +10,6 @@ AWS_REGION = "us-east-1"
 DYNAMODB = boto3.resource("dynamodb", region_name=AWS_REGION)
 META_TABLE = DYNAMODB.Table("artifact")
 
-
 @app.route("/artifacts", methods=["POST"])
 def read_artifacts():
     """
@@ -127,8 +126,7 @@ def read_artifacts():
                 "name": chosen.get("filename"),
                 "type": chosen.get("artifact_type")
             })
-
-
+        
     return jsonify(results), 200
 
 

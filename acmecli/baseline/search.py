@@ -5,9 +5,6 @@ from acmecli.baseline.modeldb import scan_models
 
 app = Flask(__name__)
 
-
-# ---------- Auth helper ----------
-
 def _require_auth() -> str:
     if request.method == "OPTIONS":
         return ""
@@ -16,8 +13,6 @@ def _require_auth() -> str:
         abort(403, description="Authentication failed due to invalid or missing AuthenticationToken.")
     return token
 
-
-# ---------- Simple semantic version handling ----------
 
 def _parse_version(vstr: str) -> tuple[int, int, int]:
     parts = vstr.strip().split(".")
@@ -87,8 +82,6 @@ def _matches_version_spec(version: str, spec: str) -> bool:
 
     return True
 
-
-# ---------- /search ----------
 
 @app.get("/search")
 def search_models():
