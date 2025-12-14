@@ -39,16 +39,7 @@ def health():
     Lightweight liveness probe. Returns HTTP 200 when the registry API is reachable.
     """
     return "", 200
-
-# PUT /authenticate
-@app.route("/authenticate", methods=["PUT"])
-def authenticate():
-    """
-    Authentication endpoint (BASELINE)
-    Returns 501 Not Implemented for authentication track.
-    """
-    return "Not Implemented", 501
-        
+     
 # Register all routes from download.py
 for rule in download_module.app.url_map.iter_rules():
     # Skip the static route
