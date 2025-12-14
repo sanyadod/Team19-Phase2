@@ -263,11 +263,8 @@ def _as_list(x: Any) -> List[str]:
         # Handle list of various types (strings, Decimals, etc.)
         result = []
         for v in x:
-            # Convert Decimal to string, handle other types
-            if isinstance(v, Decimal):
-                v_str = str(v)
-            else:
-                v_str = str(v).strip()
+            # Use _normalize_id for consistent normalization
+            v_str = _normalize_id(v)
             if v_str:
                 result.append(v_str)
         return result
@@ -275,20 +272,18 @@ def _as_list(x: Any) -> List[str]:
     if isinstance(x, (set, frozenset)):
         result = []
         for v in x:
-            if isinstance(v, Decimal):
-                v_str = str(v)
-            else:
-                v_str = str(v).strip()
+            v_str = _normalize_id(v)
             if v_str:
                 result.append(v_str)
         return result
     # sometimes stored as single string
     if isinstance(x, str) and x.strip():
-        return [x.strip()]
+        normalized = _normalize_id(x)
+        return [normalized] if normalized else []
     # Handle Decimal (though unlikely for parent IDs)
     if isinstance(x, Decimal):
-        v_str = str(x).strip()
-        return [v_str] if v_str else []
+        normalized = _normalize_id(x)
+        return [normalized] if normalized else []
     return []
 
 def _choose_parent_ids(item: Dict[str, Any], models: Dict[str, Dict[str, Any]]) -> List[str]:
@@ -297,10 +292,15 @@ def _choose_parent_ids(item: Dict[str, Any], models: Dict[str, Dict[str, Any]]) 
     DynamoDB 'parents' field is the authoritative source.
     Returns only parents that exist in `models`.
     """
-    model_id = str(item.get("id", ""))
+    model_id = _normalize_id(item.get("id", ""))
     
     # DynamoDB 'parents' field is the authoritative source
     raw_parents = item.get("parents")
+    
+    # Log raw parents field for debugging (only if parents field exists)
+    if raw_parents is not None:
+        logger.info("Model %s: Raw parents field: %s (type: %s)", model_id, raw_parents, type(raw_parents).__name__)
+    
     parents_from_db = _as_list(raw_parents)
     
     if not parents_from_db:
@@ -308,6 +308,7 @@ def _choose_parent_ids(item: Dict[str, Any], models: Dict[str, Dict[str, Any]]) 
         return []
     
     # Filter to only include parent IDs that exist in models registry
+    # Note: _as_list already normalizes IDs using _normalize_id
     valid_parents = [pid for pid in parents_from_db if pid in models]
     
     if valid_parents:
@@ -316,8 +317,10 @@ def _choose_parent_ids(item: Dict[str, Any], models: Dict[str, Dict[str, Any]]) 
     else:
         # Parents field exists but none are valid
         if len(parents_from_db) > 0:
-            logger.warning("Model %s: DynamoDB parents field has %d entries, but none exist in models registry. Invalid IDs: %s", 
-                         model_id, len(parents_from_db), [pid for pid in parents_from_db if pid not in models])
+            # Log available model IDs for debugging
+            sample_model_ids = list(models.keys())[:5] if models else []
+            logger.warning("Model %s: DynamoDB parents field has %d entries, but none exist in models registry. Invalid IDs: %s (sample model IDs: %s)", 
+                         model_id, len(parents_from_db), parents_from_db, sample_model_ids)
         return []
 
 def _build_parent_child_maps_lazy(models: Dict[str, Dict[str, Any]], 
@@ -331,6 +334,10 @@ def _build_parent_child_maps_lazy(models: Dict[str, Dict[str, Any]],
     """
     parents_map: Dict[str, List[str]] = {}
     children_map: Dict[str, List[str]] = {}
+    
+    # Debug: Count how many models have parents field
+    models_with_parents_field = sum(1 for item in models.values() if item.get("parents") is not None)
+    logger.info("Models with 'parents' field in DynamoDB: %d out of %d", models_with_parents_field, len(models))
     
     # Phase 1: Discover ancestors by following parent links
     ancestors_visited: Set[str] = set()
