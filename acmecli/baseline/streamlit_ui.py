@@ -2,7 +2,10 @@
 
 import io
 import hashlib
+import time
+import traceback
 import zipfile
+from collections import defaultdict
 from typing import List
 from urllib.parse import quote
 
@@ -15,7 +18,19 @@ from botocore.exceptions import ClientError
 S3_BUCKET = "ece-registry"
 AWS_REGION = "us-east-1"
 
+# Initialize AWS clients once at module level for better performance
 s3_client = boto3.client("s3", region_name=AWS_REGION)
+dynamodb = boto3.resource("dynamodb", region_name=AWS_REGION)
+meta_table = dynamodb.Table("artifact")
+
+# Create a requests session for connection pooling and better performance
+@st.cache_resource
+def get_requests_session():
+    """Create a cached requests session for connection pooling."""
+    session = requests.Session()
+    # Set default timeout
+    session.timeout = 60
+    return session
 
 VALID_TYPES = ["model", "code", "dataset"]
 TYPE_TO_S3_PREFIX = {
@@ -25,9 +40,11 @@ TYPE_TO_S3_PREFIX = {
 }
 
 
+@st.cache_data(ttl=300)  # Cache for 5 minutes
 def list_top_level_prefixes() -> List[str]:
     """
     Return top-level prefixes in the bucket (e.g., ['models', 'models2']).
+    Cached for 5 minutes to improve performance.
     """
     try:
         paginator = s3_client.get_paginator("list_objects_v2")
@@ -43,9 +60,11 @@ def list_top_level_prefixes() -> List[str]:
         return []
 
 
+@st.cache_data(ttl=300)  # Cache for 5 minutes
 def list_artifact_ids_for_prefix(prefix: str) -> List[str]:
     """
     Return immediate child names under the given prefix (directories or direct files).
+    Cached for 5 minutes to improve performance.
     """
     prefix = prefix.rstrip("/")
     prefix_with_slash = f"{prefix}/"
@@ -172,8 +191,6 @@ if st.button("Upload Artifact", type="primary", key="upload_btn"):
         st.error("Error: Please choose a .zip file to upload.", icon="⚠️")
     else:
         try:
-            import time
-            
             blob = uploaded_file.getvalue()
             size = len(blob)
             
@@ -203,10 +220,7 @@ if st.button("Upload Artifact", type="primary", key="upload_btn"):
                     ContentType="application/zip",
                 )
             
-            # Register in DynamoDB
-            dynamodb = boto3.resource("dynamodb", region_name=AWS_REGION)
-            meta_table = dynamodb.Table("artifact")
-            
+            # Register in DynamoDB (using cached table resource)
             with st.spinner("Registering artifact in DynamoDB..."):
                 try:
                     meta_table.put_item(
@@ -276,9 +290,10 @@ if st.button("Download from server", type="primary"):
         
         with st.spinner("Requesting file from server..."):
             try:
-                # Send request with authentication header
+                # Use cached session for better performance
+                session = get_requests_session()
                 headers = {"X-Authorization": "baseline"}
-                resp = requests.get(url, headers=headers, timeout=60)
+                resp = session.get(url, headers=headers, timeout=60)
                 
                 if resp.status_code == 200:
                     # Parse JSON response to get presigned URL
@@ -292,9 +307,10 @@ if st.button("Download from server", type="primary"):
                         with st.expander("Server Response (for debugging)"):
                             st.json(data)
                     else:
-                        # Download from presigned URL
+                        # Download from presigned URL using cached session
                         with st.spinner("Downloading file from S3..."):
-                            file_resp = requests.get(presigned_url, timeout=300)
+                            session = get_requests_session()
+                            file_resp = session.get(presigned_url, timeout=300)
                             if file_resp.status_code == 200:
                                 st.success("Success: File ready. Click below to save it.")
                                 st.download_button(
@@ -329,7 +345,6 @@ if st.button("Download from server", type="primary"):
                 st.info(f"Tip: Make sure the backend server is running at {backend_url}")
             except Exception as ex:
                 st.error(f"Error: Unexpected error - {ex}", icon="⚠️")
-                import traceback
                 with st.expander("Technical Details (for debugging)"):
                     st.code(traceback.format_exc())
 
@@ -377,9 +392,10 @@ if st.button("Calculate Cost", type="primary", key="cost_btn"):
         
         with st.spinner("Calculating cost..."):
             try:
-                # Send default token
+                # Use cached session for better performance
+                session = get_requests_session()
                 headers = {"X-Authorization": "baseline"}
-                resp = requests.get(url, headers=headers, timeout=60)
+                resp = session.get(url, headers=headers, timeout=60)
                 
                 if resp.status_code == 200:
                     cost_data = resp.json()
@@ -448,8 +464,10 @@ if st.button("Check License", type="primary", key="license_btn"):
         
         with st.spinner("Checking license compliance..."):
             try:
+                # Use cached session for better performance
+                session = get_requests_session()
                 headers = {"X-Authorization": "baseline", "Content-Type": "application/json"}
-                resp = requests.post(url, headers=headers, timeout=60)
+                resp = session.post(url, headers=headers, timeout=60)
                 
                 if resp.status_code == 200:
                     data = resp.json()
@@ -522,8 +540,10 @@ if st.button("Rate Model", type="primary", key="rate_btn"):
         
         with st.spinner("Computing model rating... This may take a moment."):
             try:
+                # Use cached session for better performance
+                session = get_requests_session()
                 headers = {"X-Authorization": "baseline"}
-                resp = requests.get(url, headers=headers, timeout=120)
+                resp = session.get(url, headers=headers, timeout=120)
                 
                 if resp.status_code == 200:
                     data = resp.json()
@@ -634,17 +654,20 @@ if st.button("Search Artifacts", type="primary", key="search_btn"):
             try:
                 headers = {"X-Authorization": "baseline"}
                 
+                # Use cached session for better performance
+                session = get_requests_session()
+                
                 if search_method == "GET (Query Parameter)":
                     url = f"{backend_url}/artifacts/search"
                     params = {"regex": regex_pattern, "offset": str(search_offset)}
-                    resp = requests.get(url, headers=headers, params=params, timeout=60)
+                    resp = session.get(url, headers=headers, params=params, timeout=60)
                 else:
                     url = f"{backend_url}/artifact/byRegEx"
                     if search_offset > 0:
                         url += f"?offset={search_offset}"
                     payload = {"regex": regex_pattern}
                     headers["Content-Type"] = "application/json"
-                    resp = requests.post(url, headers=headers, json=payload, timeout=60)
+                    resp = session.post(url, headers=headers, json=payload, timeout=60)
                 
                 if resp.status_code == 200:
                     results = resp.json()
@@ -712,8 +735,10 @@ if st.button("Get Lineage", type="primary", key="lineage_btn"):
         
         with st.spinner("Building lineage graph... This may take a moment."):
             try:
+                # Use cached session for better performance
+                session = get_requests_session()
                 headers = {"X-Authorization": "baseline"}
-                resp = requests.get(url, headers=headers, timeout=120)
+                resp = session.get(url, headers=headers, timeout=120)
                 
                 if resp.status_code == 200:
                     data = resp.json()
@@ -737,7 +762,6 @@ if st.button("Get Lineage", type="primary", key="lineage_btn"):
                             st.write("**Lineage Structure:**")
                             
                             # Build a simple text representation
-                            from collections import defaultdict
                             children_map = defaultdict(list)
                             for edge in edges:
                                 parent = edge.get("from_node_artifact_id")
@@ -806,10 +830,12 @@ st.warning("Warning: Danger Zone - This will delete ALL artifacts from the S3 bu
 if st.button("Reset Registry", type="primary"):
     with st.spinner("Resetting registry... This may take a moment."):
         try:
+            # Use cached session for better performance
+            session = get_requests_session()
             url = f"{backend_url}/reset"
             # Reset endpoint requires "admin" token
             headers = {"X-Authorization": "admin"}
-            resp = requests.delete(url, headers=headers, timeout=300)
+            resp = session.delete(url, headers=headers, timeout=300)
             
             if resp.status_code == 200:
                 st.success("Success: Registry reset successfully!")

@@ -291,11 +291,10 @@ def _as_list(x: Any) -> List[str]:
         return [v_str] if v_str else []
     return []
 
-def _choose_parent_ids(item: Dict[str, Any], models: Dict[str, Dict[str, Any]], 
-                       name_to_id: Dict[str, str], config_cache: Dict[str, Optional[Dict[str, Any]]]) -> List[str]:
+def _choose_parent_ids(item: Dict[str, Any], models: Dict[str, Dict[str, Any]]) -> List[str]:
     """
     Determine parent model IDs for a given model item.
-    DynamoDB 'parents' field is the authoritative source. S3 config.json is a best-effort fallback.
+    DynamoDB 'parents' field is the authoritative source.
     Returns only parents that exist in `models`.
     """
     model_id = str(item.get("id", ""))
@@ -304,114 +303,32 @@ def _choose_parent_ids(item: Dict[str, Any], models: Dict[str, Dict[str, Any]],
     raw_parents = item.get("parents")
     parents_from_db = _as_list(raw_parents)
     
-    if parents_from_db:
-        # Log raw value and parsed list
-        logger.warning("Model %s: Raw parents value from DynamoDB: %s", model_id, raw_parents)
-        logger.warning("Model %s: Parsed parent ID list: %s", model_id, parents_from_db)
-        
-        # Filter to only include parent IDs that exist in models registry
-        valid_parents = [pid for pid in parents_from_db if pid in models]
-        
-        if valid_parents:
-            logger.warning("Model %s: Using parents from DynamoDB: %s (filtered from %d to %d valid)", 
-                         model_id, valid_parents, len(parents_from_db), len(valid_parents))
-            return valid_parents
-        else:
-            logger.warning("Model %s: DynamoDB parents field has %d entries, but none exist in models registry", 
-                         model_id, len(parents_from_db))
-            if len(parents_from_db) > 0:
-                logger.warning("Model %s: Invalid parent IDs (not in registry): %s", 
-                             model_id, [pid for pid in parents_from_db if pid not in models])
+    if not parents_from_db:
+        # No parents field or empty list - return empty (valid case)
+        return []
     
-    # Best-effort fallback: Try S3 config.json (non-blocking)
-    # This is optional and should not prevent edge creation if DynamoDB parents exist
-    try:
-        if model_id not in config_cache:
-            config_cache[model_id] = load_config_json_from_s3(item)
-        
-        cfg = config_cache[model_id]
-        if cfg is None:
-            # S3 fallback failed, but that's okay - DynamoDB is authoritative
-            return []
-        
-        # Extract parent name from config.json
-        pname, keys_checked = _extract_parent_name_from_config(cfg)
-        
-        if not pname:
-            # No parent key found in config.json, but that's okay
-            return []
-        
-        # Try multiple lookup strategies for config.json parent name
-        pid = None
-        
-        # Strategy 1: Exact lookup
-        pid = name_to_id.get(pname)
-        if pid and pid in models:
-            logger.warning("Model %s: Parent resolved from config.json: '%s' -> %s (exact match)", 
-                          model_id, pname, pid)
-            return [pid]
-        
-        # Strategy 2: Lowercase lookup
-        pid = name_to_id.get(pname.lower())
-        if pid and pid in models:
-            logger.warning("Model %s: Parent resolved from config.json: '%s' -> %s (lowercase match)", 
-                          model_id, pname, pid)
-            return [pid]
-        
-        # Strategy 3: Stem lookup (for cases where pname includes .zip or extension)
-        stem = _get_filename_stem(pname)
-        if stem and stem != pname:
-            pid = name_to_id.get(stem)
-            if pid and pid in models:
-                logger.warning("Model %s: Parent resolved from config.json: '%s' -> %s (stem match: '%s')", 
-                              model_id, pname, pid, stem)
-                return [pid]
-            
-            # Try lowercase stem
-            pid = name_to_id.get(stem.lower())
-            if pid and pid in models:
-                logger.warning("Model %s: Parent resolved from config.json: '%s' -> %s (lowercase stem match: '%s')", 
-                              model_id, pname, pid, stem)
-                return [pid]
-        
-        # Strategy 4: HuggingFace-style tail extraction
-        hf_tail = _extract_hf_model_tail(pname)
-        if hf_tail:
-            pid = name_to_id.get(hf_tail)
-            if pid and pid in models:
-                logger.warning("Model %s: Parent resolved from config.json: '%s' -> %s (HF tail match: '%s')", 
-                              model_id, pname, pid, hf_tail)
-                return [pid]
-            
-            pid = name_to_id.get(hf_tail.lower())
-            if pid and pid in models:
-                logger.warning("Model %s: Parent resolved from config.json: '%s' -> %s (lowercase HF tail match: '%s')", 
-                              model_id, pname, pid, hf_tail)
-                return [pid]
-        
-        # Config.json parent name could not be resolved
-        available_keys = sorted(name_to_id.keys())[:10]
-        logger.warning("Model %s: Parent name '%s' from config.json not found in registry. "
-                      "Available keys (first 10): %s", model_id, pname, available_keys)
+    # Filter to only include parent IDs that exist in models registry
+    valid_parents = [pid for pid in parents_from_db if pid in models]
     
-    except Exception as e:
-        # S3/config.json errors should not block lineage if DynamoDB parents exist
-        # Log but don't fail
-        logger.warning("Model %s: Error in S3 config.json fallback (non-blocking): %s", model_id, e)
-    
-    return []
+    if valid_parents:
+        logger.info("Model %s: Using parents from DynamoDB: %s", model_id, valid_parents)
+        return valid_parents
+    else:
+        # Parents field exists but none are valid
+        if len(parents_from_db) > 0:
+            logger.warning("Model %s: DynamoDB parents field has %d entries, but none exist in models registry. Invalid IDs: %s", 
+                         model_id, len(parents_from_db), [pid for pid in parents_from_db if pid not in models])
+        return []
 
 def _build_parent_child_maps_lazy(models: Dict[str, Dict[str, Any]], 
                                    start_id: str, 
                                    max_depth: int = 10) -> Tuple[Dict[str, List[str]], Dict[str, List[str]]]:
     """
-    Build parent/child maps lazily by only loading config.json for visited nodes.
+    Build parent/child maps using DynamoDB parents field.
     Uses BFS starting from start_id for ancestors, then discovers descendants.
     parents_map[child_id] = [parent_ids]
     children_map[parent_id] = [child_ids]
     """
-    name_to_id = _build_name_to_id_map(models)
-    config_cache: Dict[str, Optional[Dict[str, Any]]] = {}
     parents_map: Dict[str, List[str]] = {}
     children_map: Dict[str, List[str]] = {}
     
@@ -434,7 +351,7 @@ def _build_parent_child_maps_lazy(models: Dict[str, Dict[str, Any]],
         item = models[current_id]
         
         try:
-            parent_ids = _choose_parent_ids(item, models, name_to_id, config_cache)
+            parent_ids = _choose_parent_ids(item, models)
         except Exception as e:
             logger.error("Error choosing parent IDs for %s: %s", current_id, e, exc_info=True)
             continue
@@ -463,7 +380,7 @@ def _build_parent_child_maps_lazy(models: Dict[str, Dict[str, Any]],
                 continue
             
             try:
-                parent_ids = _choose_parent_ids(item, models, name_to_id, config_cache)
+                parent_ids = _choose_parent_ids(item, models)
                 
                 if current_id in parent_ids:
                     if child_id not in parents_map:
@@ -538,10 +455,12 @@ def _build_lineage_graph(start_id: str,
     for nid in sorted(node_ids):
         item = models.get(nid, {})
         node_name = _display_name(item, nid)
+        # Use source_url if available, otherwise use "registry" as default
+        source = item.get("source_url", "registry")
         nodes.append({
             "artifact_id": nid,
             "name": node_name,
-            "source": "config_json",
+            "source": source,
         })
     
     edges = []
@@ -570,7 +489,7 @@ def _build_lineage_graph(start_id: str,
 def get_lineage(artifact_id: str):
     """
     Retrieve the lineage graph for a model artifact.
-    Returns ancestors, the model itself, and descendants based on config.json analysis.
+    Returns ancestors, the model itself, and descendants based on DynamoDB parents field.
     """
     logger.info("Lineage request for artifact_id: %s", artifact_id)
     
