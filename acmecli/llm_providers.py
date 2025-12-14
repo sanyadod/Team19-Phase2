@@ -28,6 +28,59 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 
+def _extract_json_object(s: str) -> str:
+    """
+    Accept model output that may contain ```json fences or extra text.
+    Return the best-effort JSON object substring, or "" if none found.
+    """
+    if not s:
+        return ""
+
+    text = s.strip()
+
+    # Remove ```json / ``` fences if present
+    if text.startswith("```"):
+        lines = text.splitlines()
+        if lines and lines[0].startswith("```"):
+            lines = lines[1:]
+        if lines and lines[-1].strip().startswith("```"):
+            lines = lines[:-1]
+        text = "\n".join(lines).strip()
+
+    # Best-effort: find first {...} JSON object
+    start = text.find("{")
+    end = text.rfind("}")
+    if start != -1 and end != -1 and end > start:
+        return text[start : end + 1].strip()
+
+    return ""
+
+
+def _clamp01(x: float) -> float:
+    if x < 0.0:
+        return 0.0
+    if x > 1.0:
+        return 1.0
+    return x
+
+
+def _normalize_score(x: Any) -> float:
+    """
+    Convert score to float and normalize to [0,1].
+    Accepts either 0-1 or 0-10 (normalizes down if >1).
+    """
+    try:
+        v = float(x)
+    except Exception:
+        return 0.0
+
+    # If model used 0-10 scale, normalize
+    if v > 1.0:
+        v = v / 10.0
+
+    return _clamp01(v)
+
+
 class LLMProvider(ABC):
     @abstractmethod
     def analyze_readme(self, model_name: str, readme: str) -> Dict[str, Any]:
@@ -91,15 +144,21 @@ class PurdueGenAIProvider(LLMProvider):
                 logger.warning("Unexpected GenAI response shape: %r", str(data)[:500])
                 return {"documentation_quality": 0.0, "ease_of_use": 0.0, "examples_present": False}
 
+            # NEW: tolerate code fences / extra text around JSON
+            json_str = _extract_json_object(content)
+            if not json_str:
+                logger.warning("Model output missing JSON object model=%s output=%r", self.model, content[:500])
+                return {"documentation_quality": 0.0, "ease_of_use": 0.0, "examples_present": False}
+
             try:
-                parsed = json.loads(content)
+                parsed = json.loads(json_str)
             except Exception:
                 logger.warning("Model output not JSON model=%s output=%r", self.model, content[:500])
                 return {"documentation_quality": 0.0, "ease_of_use": 0.0, "examples_present": False}
 
             return {
-                "documentation_quality": float(parsed.get("documentation_quality", 0.0)),
-                "ease_of_use": float(parsed.get("ease_of_use", 0.0)),
+                "documentation_quality": _normalize_score(parsed.get("documentation_quality", 0.0)),
+                "ease_of_use": _normalize_score(parsed.get("ease_of_use", 0.0)),
                 "examples_present": bool(parsed.get("examples_present", False)),
             }
 
