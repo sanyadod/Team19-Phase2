@@ -3,12 +3,8 @@
 
 from __future__ import annotations
 
-import io
 import json
-import time
-import zipfile
 from typing import Any, Dict, Optional
-from urllib.parse import quote
 
 import requests
 import streamlit as st
@@ -19,73 +15,112 @@ import streamlit as st
 # -----------------------------
 st.set_page_config(page_title="Artifact Registry", page_icon="📦", layout="centered")
 
-# Inject accessibility improvements via custom CSS/HTML
-st.markdown("""
+# Accessibility + contrast fixes (CSS only; no JS).
+# - Fixes color-contrast by forcing high-contrast text on dark backgrounds
+# - Fixes button-name by hiding Streamlit's icon-only toolbar/menu
+# - Improves keyboard focus indicators
+st.markdown(
+    """
 <style>
-    /* Ensure proper focus indicators for keyboard navigation */
-    button:focus, input:focus, select:focus, textarea:focus {
-        outline: 2px solid #0066cc;
-        outline-offset: 2px;
-    }
-    /* Fix color contrast for headings (WCAG 1.4.3 - 3:1 ratio for large text) */
-    h1, h2, h3, h4, h5, h6 {
-        color: #5d6179 !important;
-    }
-    /* Fix color contrast for paragraphs and captions (WCAG 1.4.3 - 4.5:1 ratio for normal text) */
-    p, .stMarkdown p, .stCaption, .stText, .st-emotion-cache-1fq9onn > p {
-        color: #6f79ae !important;
-    }
-    /* Fix color contrast for general markdown text */
-    .stMarkdown {
-        color: #6f79ae !important;
-    }
+/* -----------------------------
+   High-contrast defaults
+   ----------------------------- */
+:root {
+  --text-high: #F9FAFB;      /* near-white */
+  --text-med:  #E5E7EB;      /* light gray */
+  --text-low:  #D1D5DB;      /* still readable */
+  --bg-main:   #0B1220;      /* deep navy */
+  --bg-card:   #111827;      /* dark slate */
+  --bg-input:  #1F2937;      /* input background */
+  --border:    #374151;      /* border */
+  --focus:     #60A5FA;      /* focus blue */
+}
+
+.stApp {
+  background-color: var(--bg-main) !important;
+}
+
+/* Make text readable by default */
+html, body, [class*="st-"], [class*="css"] {
+  color: var(--text-med) !important;
+}
+
+/* Headings */
+h1, h2, h3, h4, h5, h6 {
+  color: var(--text-high) !important;
+}
+
+/* Paragraphs / markdown / captions / labels */
+p, .stMarkdown, .stMarkdown p, .stCaption, .stText, small, label {
+  color: var(--text-med) !important;
+}
+
+/* Sidebar */
+section[data-testid="stSidebar"] {
+  background-color: var(--bg-card) !important;
+}
+section[data-testid="stSidebar"] * {
+  color: var(--text-med) !important;
+}
+
+/* Inputs */
+input, textarea, select, [data-baseweb="input"] input {
+  background-color: var(--bg-input) !important;
+  color: var(--text-high) !important;
+  border-color: var(--border) !important;
+}
+
+/* Placeholder readability */
+::placeholder {
+  color: var(--text-low) !important;
+  opacity: 1 !important;
+}
+
+/* Buttons */
+button, [role="button"] {
+  color: var(--text-high) !important;
+}
+button[kind="primary"] {
+  background-color: #2563EB !important;
+}
+button[kind="secondary"], button[kind="tertiary"] {
+  background-color: transparent !important;
+  border: 1px solid var(--border) !important;
+}
+
+/* Keyboard focus indicators */
+button:focus, input:focus, select:focus, textarea:focus,
+button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible,
+[data-baseweb="input"] input:focus, [data-baseweb="input"] input:focus-visible {
+  outline: 3px solid var(--focus) !important;
+  outline-offset: 2px !important;
+}
+
+/* Fix "button-name" by removing Streamlit icon-only toolbar/menu */
+#MainMenu { visibility: hidden; }
+header { visibility: hidden; }
+footer { visibility: hidden; }
+div[data-testid="stToolbar"] { display: none !important; }
+div[data-testid="stHeader"]  { display: none !important; }
+
+/* Radios/checkbox labels readable */
+div[role="radiogroup"] * {
+  color: var(--text-med) !important;
+}
 </style>
-<script>
-    // Fix accessibility issues
-    (function() {
-        function fixAccessibility() {
-            // Fix button-name: Add aria-label to Streamlit menu button
-            const menuButton = document.querySelector('#MainMenu button[kind="headerNoPadding"]');
-            if (menuButton && !menuButton.getAttribute('aria-label') && !menuButton.getAttribute('aria-labelledby')) {
-                menuButton.setAttribute('aria-label', 'Main menu');
-            }
-            
-            // Fix aria-allowed-attr: Remove conflicting aria attributes
-            // Elements with role="presentation" or role="none" should not have aria-labelledby
-            document.querySelectorAll('[role="presentation"][aria-labelledby], [role="none"][aria-labelledby]').forEach(el => {
-                el.removeAttribute('aria-labelledby');
-            });
-            
-            // Elements should not have both aria-label and aria-labelledby (aria-labelledby takes precedence)
-            document.querySelectorAll('[aria-label][aria-labelledby]').forEach(el => {
-                // Keep aria-labelledby, remove aria-label if both exist
-                if (el.getAttribute('aria-labelledby')) {
-                    el.removeAttribute('aria-label');
-                }
-            });
-        }
-        // Run immediately and after DOM updates
-        fixAccessibility();
-        setTimeout(fixAccessibility, 100);
-        setTimeout(fixAccessibility, 500);
-        // Use MutationObserver to catch dynamically added elements
-        const observer = new MutationObserver(fixAccessibility);
-        observer.observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['aria-label', 'aria-labelledby', 'role'] });
-    })();
-</script>
-""", unsafe_allow_html=True)
+""",
+    unsafe_allow_html=True,
+)
 
 DEFAULT_BACKEND_URL = (
-    st.secrets.get("BACKEND_URL", None)
-    if hasattr(st, "secrets")
-    else None
+    st.secrets.get("BACKEND_URL", None) if hasattr(st, "secrets") else None
 ) or "http://127.0.0.1:5000"
 
 VALID_TYPES = ["model", "code", "dataset"]
 
 # Performance feature flags (set to False for maximum Lighthouse score)
 ENABLE_LINEAGE_VISUALIZATION = False  # feature #1 removed (graph rendering)
-ENABLE_LARGE_PREVIEWS = False         # feature #2 removed (big json/dataframes)
+ENABLE_LARGE_PREVIEWS = False  # feature #2 removed (big json/dataframes)
 
 
 # -----------------------------
@@ -94,7 +129,6 @@ ENABLE_LARGE_PREVIEWS = False         # feature #2 removed (big json/dataframes)
 @st.cache_resource
 def get_session() -> requests.Session:
     s = requests.Session()
-    # If you want retries, add them here carefully (but keep lightweight).
     return s
 
 
@@ -106,9 +140,7 @@ def _safe_json(resp: requests.Response) -> Dict[str, Any]:
 
 
 def _small_preview(obj: Any, limit: int = 1200) -> str:
-    """
-    Produce a small, safe preview string (prevents huge DOM and Lighthouse penalties).
-    """
+    """Produce a small, safe preview string (prevents huge DOM and Lighthouse penalties)."""
     try:
         s = json.dumps(obj, indent=2, ensure_ascii=False)
     except Exception:
@@ -132,7 +164,9 @@ def request_json(method: str, url: str, *, timeout: int = 15, **kwargs) -> Dict[
 # -----------------------------
 def sidebar_backend_url() -> str:
     st.sidebar.markdown("### Settings")
-    backend = st.sidebar.text_input("Backend URL", value=DEFAULT_BACKEND_URL, key="backend_url_input")
+    backend = st.sidebar.text_input(
+        "Backend URL", value=DEFAULT_BACKEND_URL, key="backend_url_input"
+    )
     return backend.rstrip("/")
 
 
@@ -153,13 +187,11 @@ def page_header(title: str, subtitle: Optional[str] = None) -> None:
 
 
 def show_result(result: Dict[str, Any], *, title: str = "Result") -> None:
-    # Keep output lightweight by default.
     st.markdown(f"**{title}**")
     if ENABLE_LARGE_PREVIEWS:
         st.json(result)
     else:
         st.code(_small_preview(result), language="json")
-        # Optional expand for debugging without hurting default performance too much:
         with st.expander("Expand full response (debug)", expanded=False):
             st.json(result)
 
@@ -170,7 +202,10 @@ def show_result(result: Dict[str, Any], *, title: str = "Result") -> None:
 def render_home() -> None:
     page_header("Artifact Registry", "Upload, download, and manage artifacts.")
     st.write("Use the sidebar to open a tool.")
-    st.info("This registry allows you to manage ML models, datasets, and code artifacts. Store, search, and track lineage for all your machine learning artifacts in one centralized location.")
+    st.info(
+        "This registry allows you to manage ML models, datasets, and code artifacts. "
+        "Store, search, and track lineage for all your machine learning artifacts in one centralized location."
+    )
 
 
 def render_upload(backend: str) -> None:
@@ -186,7 +221,6 @@ def render_upload(backend: str) -> None:
             st.error("Please choose a ZIP file to upload.")
             return
 
-        # Read file bytes (small cost)
         data = uploaded.getvalue()
         files = {"file": (uploaded.name, data, "application/zip")}
         params = {"type": artifact_type}
@@ -208,7 +242,6 @@ def render_download(backend: str) -> None:
             st.error("Please enter an Artifact ID.")
             return
 
-        # Backend can return a signed URL or raw bytes; we handle both.
         with st.spinner("Requesting download..."):
             result = request_json(
                 "GET",
@@ -217,12 +250,13 @@ def render_download(backend: str) -> None:
                 timeout=30,
             )
 
-        # If backend returns a URL, show a link.
         url = result.get("url") or result.get("download_url")
         if isinstance(url, str) and url.startswith("http"):
             st.success("Download ready.")
-            # Use markdown link with proper accessibility attributes
-            st.markdown(f'<a href="{url}" target="_blank" rel="noopener noreferrer" aria-label="Open download link in new tab">Open download</a>', unsafe_allow_html=True)
+            st.markdown(
+                f'<a href="{url}" target="_blank" rel="noopener noreferrer" aria-label="Open download link in new tab">Open download</a>',
+                unsafe_allow_html=True,
+            )
             if not ENABLE_LARGE_PREVIEWS:
                 st.caption("Response details truncated for performance.")
         else:
@@ -235,7 +269,9 @@ def render_search(backend: str) -> None:
     method = st.radio("Search Method", ["GET", "POST"], horizontal=True, key="search_method")
     pattern = st.text_input("Regex Pattern", value=".*", key="search_pattern")
 
-    artifact_type = st.selectbox("Artifact type (optional)", ["(any)"] + VALID_TYPES, index=0, key="search_artifact_type")
+    artifact_type = st.selectbox(
+        "Artifact type (optional)", ["(any)"] + VALID_TYPES, index=0, key="search_artifact_type"
+    )
 
     if st.button("Run Search", key="search_button"):
         payload: Dict[str, Any] = {"pattern": pattern}
@@ -264,12 +300,10 @@ def render_lineage(backend: str) -> None:
         with st.spinner("Fetching lineage..."):
             result = request_json("GET", f"{backend}/lineage", params={"id": model_id.strip()}, timeout=30)
 
-        # Feature #1 removed: no graph drawing by default.
         show_result(result, title="Lineage response")
 
         if ENABLE_LINEAGE_VISUALIZATION:
             st.warning("Lineage visualization is enabled, which may reduce Lighthouse performance.")
-            # If you *ever* re-enable: do lazy imports inside this block.
 
 
 def render_cost(backend: str) -> None:
@@ -356,7 +390,6 @@ def main() -> None:
     backend = sidebar_backend_url()
     page = sidebar_navigation()
 
-    # Route only the selected page (critical for Lighthouse performance)
     if page == "Home":
         render_home()
     elif page == "Upload":
