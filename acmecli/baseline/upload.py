@@ -210,12 +210,14 @@ def create_artifact(artifact_type: str):
     size_bytes, sha256 = _download_and_store(source_url, s3_key)
 
     # Write metadata to DynamoDB
+    # Store "name" consistently, keep "filename" for backward compatibility
     db_item = {
         "id": artifact_id,
         "artifact_type": artifact_type,
         "s3_bucket": S3_BUCKET_DEFAULT,
         "s3_key": s3_key,
-        "filename": artifact_name,
+        "name": artifact_name,  # Primary name field
+        "filename": artifact_name,  # Backward compatibility
         "source_url": source_url,
         "size_bytes": size_bytes,
         "sha256": sha256,
