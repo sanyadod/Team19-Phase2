@@ -132,11 +132,6 @@ def ingest_artifact():
         if not is_ingestible:
             abort(400, description=reason)
         
-        logger.info("Model passed ingestibility check")
-        
-        # Step 3: Use upload module to create the artifact
-        logger.info("Step 3: Uploading artifact using upload module...")
-        
         
 
         # Step 3: forward payload to upload module
