@@ -68,13 +68,18 @@ def load_config_json_from_s3_zip(item: Dict[str, Any]) -> Optional[Dict[str, Any
         return None
     
     try:
-        # Download the zip file from S3
-        logger.debug("Downloading zip from S3: bucket=%s, key=%s", bucket, key)
+        # Download the file from S3
+        logger.debug("Downloading file from S3: bucket=%s, key=%s", bucket, key)
         response = S3_CLIENT.get_object(Bucket=bucket, Key=key)
-        zip_data = response["Body"].read()
+        file_data = response["Body"].read()
+        
+        # Check if file is actually a zip file by checking magic bytes
+        if not file_data.startswith(b'PK\x03\x04') and not file_data.startswith(b'PK\x05\x06'):
+            logger.debug("File s3://%s/%s is not a zip file (missing PK header)", bucket, key)
+            return None
         
         # Open as zipfile and search for config.json
-        with zipfile.ZipFile(io.BytesIO(zip_data)) as zf:
+        with zipfile.ZipFile(io.BytesIO(file_data)) as zf:
             config_path = None
             # Search for config.json in root or nested folders
             for name in zf.namelist():
@@ -103,8 +108,11 @@ def load_config_json_from_s3_zip(item: Dict[str, Any]) -> Optional[Dict[str, Any
     except ClientError as e:
         logger.error("S3 get_object failed: bucket=%s, key=%s, error=%s", bucket, key, e, exc_info=True)
         abort(500, description="The artifact storage encountered an error.")
-    except (zipfile.BadZipFile, IOError) as e:
-        logger.warning("Failed to read zip file: bucket=%s, key=%s, error=%s", bucket, key, e)
+    except zipfile.BadZipFile as e:
+        logger.debug("File s3://%s/%s is not a valid zip file: %s", bucket, key, e)
+        return None
+    except IOError as e:
+        logger.warning("IO error reading zip file s3://%s/%s: %s", bucket, key, e)
         return None
     except Exception as e:
         logger.error("Unexpected error loading config.json: bucket=%s, key=%s, error=%s", bucket, key, e, exc_info=True)
