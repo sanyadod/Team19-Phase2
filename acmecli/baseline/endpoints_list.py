@@ -10,9 +10,6 @@ AWS_REGION = "us-east-1"
 DYNAMODB = boto3.resource("dynamodb", region_name=AWS_REGION)
 META_TABLE = DYNAMODB.Table("artifact")
 
-MAX_RESULTS = 1000  # Prevent DoS by returning too many results
-PAGE_SIZE = 100 
-
 @app.route("/artifacts", methods=["POST"])
 def read_artifacts():
     """
@@ -130,41 +127,6 @@ def read_artifacts():
                 "type": chosen.get("artifact_type")
             })
         
-        # Check if result set is too large
-        if len(results) > MAX_RESULTS:
-            logger.warning(f"Too many results: {len(results)} exceeds MAX_RESULTS={MAX_RESULTS}")
-            abort(413, description="Too many artifacts returned.")
-        
-        # Apply pagination
-        total = len(results)
-        end_idx = min(offset + PAGE_SIZE, total)
-        paginated = results[offset:end_idx]
-        
-        # Calculate next offset
-        next_offset = str(end_idx) if end_idx < total else None
-        
-        # Build response with offset header
-        resp = jsonify(paginated)
-        if next_offset:
-            resp.headers.add("offset", next_offset)
-        
-        logger.info(
-            "GET /artifacts: returned %d/%d artifacts (offset=%d)",
-            len(paginated),
-            total,
-            offset
-        )
-        return resp, 200
-        
-    except ClientError as e:
-        logger.error("DynamoDB error in /artifacts: %s", e, exc_info=True)
-        abort(500, description="The artifact storage encountered an error.")
-        
-    except Exception as e:
-        logger.error("Unexpected error in /artifacts: %s", e, exc_info=True) 
-        abort(500, description="The artifact storage encountered an error.")
-
-
     return jsonify(results), 200
 
 
