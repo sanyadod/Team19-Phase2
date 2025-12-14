@@ -128,17 +128,22 @@ def search_artifacts_internal(regex_str: str, offset: int = 0):
     results = []
     for item in all_items:
         # Get fields to search - check each field individually
+        # Include README content if available (could be in various field names)
         fields_to_search = [
             str(item.get('filename', '') or ''),
             str(item.get('artifact_type', '') or ''),
-            str(item.get('source_url', '') or '')
+            str(item.get('source_url', '') or ''),
+            str(item.get('readme', '') or ''),
+            str(item.get('readme_content', '') or ''),
+            str(item.get('description', '') or ''),
+            str(item.get('readme_text', '') or ''),
         ]
         
         matched = False
         try:
             # Check if regex matches ANY of the fields
             for field_value in fields_to_search:
-                if safe_regex_match(regex_str, field_value):
+                if field_value and safe_regex_match(regex_str, field_value):
                     matched = True
                     break
         except TimeoutError:
