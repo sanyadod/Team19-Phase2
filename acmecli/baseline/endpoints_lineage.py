@@ -7,6 +7,7 @@ import io
 import zipfile
 from collections import deque
 from typing import Dict, List, Any, Optional, Set, Tuple
+from decimal import Decimal
 
 app = Flask(__name__)
 logger = logging.getLogger(__name__)
@@ -25,6 +26,14 @@ def _valid_id(artifact_id: str) -> bool:
     if not artifact_id:
         return False
     return all(c.isalnum() or c in "-._" for c in artifact_id)
+
+def _normalize_id(id_value: Any) -> str:
+    """Normalize an ID value from DynamoDB to a string, handling Decimal and other types."""
+    if id_value is None:
+        return ""
+    if isinstance(id_value, Decimal):
+        return str(id_value).strip()
+    return str(id_value).strip()
 
 def _scan_all_models() -> Dict[str, Dict[str, Any]]:
     """Scan DynamoDB once, return {model_id -> item} for artifact_type == 'model'."""
@@ -47,7 +56,8 @@ def _scan_all_models() -> Dict[str, Dict[str, Any]]:
         for it in items:
             artifact_type = it.get("artifact_type")
             if artifact_type == "model":
-                mid = str(it.get("id", "")).strip()
+                # Normalize ID (handle DynamoDB types like Decimal)
+                mid = _normalize_id(it.get("id"))
                 if mid:
                     models[mid] = it
                     logger.debug("Added model: id=%s, name=%s", mid, it.get("name", "unknown"))
@@ -95,8 +105,14 @@ def load_config_json_from_s3_zip(item: Dict[str, Any]) -> Optional[Dict[str, Any
         
         # Check if file is actually a zip file by checking magic bytes
         if not file_data.startswith(b'PK\x03\x04') and not file_data.startswith(b'PK\x05\x06'):
-            logger.warning("Model %s: File s3://%s/%s is not a zip file (missing PK header, first bytes: %s)", 
-                          model_id, bucket, key, file_data[:10] if len(file_data) >= 10 else file_data)
+            # Check if it's HTML (common error case)
+            if file_data.startswith(b'<!doctype') or file_data.startswith(b'<html') or file_data.startswith(b'<HTML'):
+                logger.warning("Model %s: File s3://%s/%s appears to be HTML instead of zip (first 100 chars: %s). "
+                              "This may indicate an upload issue or S3 redirect error.", 
+                              model_id, bucket, key, file_data[:100].decode('utf-8', errors='ignore'))
+            else:
+                logger.warning("Model %s: File s3://%s/%s is not a zip file (missing PK header, first bytes: %s)", 
+                              model_id, bucket, key, file_data[:10] if len(file_data) >= 10 else file_data)
             return None
         
         # Open as zipfile and search for config.json
@@ -213,14 +229,39 @@ def _build_name_to_id_map(models: Dict[str, Dict[str, Any]]) -> Dict[str, str]:
     return m
 
 def _as_list(x: Any) -> List[str]:
-    """Normalize list-ish parent fields."""
+    """Normalize list-ish parent fields. Handles DynamoDB types (Decimal, sets, etc.)."""
     if x is None:
         return []
     if isinstance(x, list):
-        return [str(v).strip() for v in x if str(v).strip()]
+        # Handle list of various types (strings, Decimals, etc.)
+        result = []
+        for v in x:
+            # Convert Decimal to string, handle other types
+            if isinstance(v, Decimal):
+                v_str = str(v)
+            else:
+                v_str = str(v).strip()
+            if v_str:
+                result.append(v_str)
+        return result
+    # Handle DynamoDB sets
+    if isinstance(x, (set, frozenset)):
+        result = []
+        for v in x:
+            if isinstance(v, Decimal):
+                v_str = str(v)
+            else:
+                v_str = str(v).strip()
+            if v_str:
+                result.append(v_str)
+        return result
     # sometimes stored as single string
     if isinstance(x, str) and x.strip():
         return [x.strip()]
+    # Handle Decimal (though unlikely for parent IDs)
+    if isinstance(x, Decimal):
+        v_str = str(x).strip()
+        return [v_str] if v_str else []
     return []
 
 def _choose_parent_ids(item: Dict[str, Any], models: Dict[str, Dict[str, Any]], 
@@ -236,50 +277,77 @@ def _choose_parent_ids(item: Dict[str, Any], models: Dict[str, Dict[str, Any]],
     model_id = str(item.get("id", ""))
     logger.debug("_choose_parent_ids: Starting for model_id=%s", model_id)
     
+    # Log all available fields in the item for debugging
+    all_keys = list(item.keys())
+    logger.debug("Model %s: Available DynamoDB fields: %s", model_id, all_keys)
+    
     # 1) single stored parent id fields 
     logger.debug("Model %s: Checking single parent ID fields...", model_id)
     single_keys = ["parent_uuid", "parent_id", "parent_artifact_id", "base_model_id"]
     for k in single_keys:
-        if k in item and item[k]:
-            pid = str(item[k]).strip()
-            logger.debug("Model %s: Found field %s=%s", model_id, k, pid)
-            if pid in models:
-                logger.info("Model %s: Found parent %s from field %s (parent exists in registry)", model_id, pid, k)
-                return [pid]
+        if k in item:
+            value = item[k]
+            logger.debug("Model %s: Field %s exists, value=%s (type: %s)", model_id, k, value, type(value))
+            if value is not None:
+                # Normalize ID (handle DynamoDB Decimal type, etc.)
+                pid = _normalize_id(value)
+                
+                if pid:  # Check if not empty after stripping
+                    logger.debug("Model %s: Found field %s=%s", model_id, k, pid)
+                    if pid in models:
+                        logger.info("Model %s: Found parent %s from field %s (parent exists in registry)", model_id, pid, k)
+                        return [pid]
+                    else:
+                        logger.debug("Model %s: Field %s=%s but parent not found in registry (checked %d models, sample IDs: %s)", 
+                                 model_id, k, pid, len(models), list(models.keys())[:5] if models else [])
+                else:
+                    logger.debug("Model %s: Field %s exists but is empty after conversion", model_id, k)
             else:
-                logger.debug("Model %s: Field %s=%s but parent not found in registry", model_id, k, pid)
+                logger.debug("Model %s: Field %s exists but is None", model_id, k)
+        else:
+            logger.debug("Model %s: Field %s not present in DynamoDB item", model_id, k)
 
     # 2) list stored fields
     logger.debug("Model %s: Checking list parent ID fields...", model_id)
     list_keys = ["parents", "parent_uuids", "parent_ids", "base_model_ids"]
     for k in list_keys:
-        if k in item and item[k]:
+        if k in item:
             raw_value = item[k]
-            logger.debug("Model %s: Found list field %s=%s (type: %s)", model_id, k, raw_value, type(raw_value))
-            pids = [pid for pid in _as_list(item[k]) if pid in models]
-            if pids:
-                logger.info("Model %s: Found %d parents %s from field %s (all exist in registry)", 
-                           model_id, len(pids), pids, k)
-                return pids
-            else:
+            logger.debug("Model %s: Field %s exists, value=%s (type: %s)", model_id, k, raw_value, type(raw_value))
+            if raw_value:
+                logger.debug("Model %s: Found list field %s=%s (type: %s)", model_id, k, raw_value, type(raw_value))
                 all_pids = _as_list(item[k])
-                missing = [pid for pid in all_pids if pid not in models]
-                if missing:
-                    logger.debug("Model %s: Field %s has parents %s but %s not found in registry", 
-                               model_id, k, all_pids, missing)
+                logger.debug("Model %s: Normalized list field %s to parent IDs: %s", model_id, k, all_pids)
+                pids = [pid for pid in all_pids if pid in models]
+                if pids:
+                    logger.info("Model %s: Found %d parents %s from field %s (all exist in registry)", 
+                               model_id, len(pids), pids, k)
+                    return pids
+                else:
+                    missing = [pid for pid in all_pids if pid not in models]
+                    if missing:
+                        logger.debug("Model %s: Field %s has parents %s but %s not found in registry (sample model IDs: %s)", 
+                                   model_id, k, all_pids, missing, list(models.keys())[:5] if models else [])
+                    elif all_pids:
+                        logger.debug("Model %s: Field %s has parents %s but none exist in registry (sample model IDs: %s)", 
+                                   model_id, k, all_pids, list(models.keys())[:5] if models else [])
+            else:
+                logger.debug("Model %s: Field %s exists but is empty/None", model_id, k)
+        else:
+            logger.debug("Model %s: Field %s not present in DynamoDB item", model_id, k)
 
-    # 3) config_json from S3 zip (name -> id)
-    logger.debug("Model %s: Attempting to load config.json from S3...", model_id)
+    # 3) config_json from S3 zip (name -> id) - only if DynamoDB fields didn't work
+    logger.debug("Model %s: No parent relationships found in DynamoDB fields, attempting to load config.json from S3...", model_id)
     # Check cache first
     if model_id not in config_cache:
         logger.debug("Model %s: Config.json not in cache, loading from S3...", model_id)
         config_cache[model_id] = load_config_json_from_s3_zip(item)
     else:
-        logger.debug("Model %s: Using cached config.json", model_id)
+        logger.debug("Model %s: Using cached config.json result", model_id)
     
     cfg = config_cache[model_id]
     if cfg:
-        logger.debug("Model %s: Config.json loaded, extracting parent name...", model_id)
+        logger.debug("Model %s: Config.json loaded successfully, extracting parent name...", model_id)
         pname = _extract_parent_name_from_config(cfg)
         if pname:
             logger.info("Model %s: Extracted base model name '%s' from config.json", model_id, pname)
@@ -298,9 +366,9 @@ def _choose_parent_ids(item: Dict[str, Any], models: Dict[str, Dict[str, Any]],
         else:
             logger.debug("Model %s: No parent name extracted from config.json", model_id)
     else:
-        logger.debug("Model %s: Config.json not available or failed to load", model_id)
+        logger.debug("Model %s: Config.json not available or failed to load (file may not be a valid zip)", model_id)
 
-    logger.debug("Model %s: No parents found via any method", model_id)
+    logger.info("Model %s: No parents found via any method (checked DynamoDB fields and config.json)", model_id)
     return []
 
 def _build_parent_child_maps_lazy(models: Dict[str, Dict[str, Any]], 
@@ -603,12 +671,22 @@ def get_lineage(artifact_id: str):
     
     logger.info("Artifact found: artifact_id=%s, name=%s", artifact_id, _display_name(models[artifact_id], artifact_id))
     
+    # Log available model IDs for debugging
+    all_model_ids = sorted(models.keys())
+    logger.debug("Available model IDs in registry: %s", all_model_ids[:20] if len(all_model_ids) > 20 else all_model_ids)
+    
     # Build parent/child maps lazily (only load config.json for visited nodes)
     logger.info("Building parent/child relationship maps...")
     try:
         parents_map, children_map = _build_parent_child_maps_lazy(models, artifact_id, max_depth=10)
         logger.info("Parent/child maps built: %d models with parents, %d models with children", 
                    len(parents_map), len(children_map))
+        
+        # Log detailed summary of relationships found
+        if len(parents_map) > 0:
+            logger.info("Models with parents: %s", list(parents_map.keys())[:10])
+        if len(children_map) > 0:
+            logger.info("Models with children: %s", list(children_map.keys())[:10])
     except Exception as e:
         logger.error("Failed to build parent/child maps: %s", e, exc_info=True)
         abort(400, description="The lineage graph cannot be computed because the artifact metadata is missing or malformed.")
@@ -621,6 +699,15 @@ def get_lineage(artifact_id: str):
         logger.debug("Graph nodes: %s", [n.get("artifact_id") for n in graph.get("nodes", [])])
         logger.debug("Graph edges: %s", [(e.get("from_node_artifact_id"), e.get("to_node_artifact_id")) 
                                          for e in graph.get("edges", [])])
+        
+        # Summary log
+        if len(graph.get("edges", [])) == 0:
+            logger.warning("Lineage graph has no edges - no parent/child relationships found. "
+                          "This may indicate: 1) Parent relationships not stored in DynamoDB metadata, "
+                          "2) S3 files are not valid zip files (check upload process), "
+                          "3) config.json files missing or don't contain parent model references")
+        else:
+            logger.info("Lineage graph successfully built with %d relationships", len(graph.get("edges", [])))
     except Exception as e:
         logger.error("Failed to build lineage graph: %s", e, exc_info=True)
         abort(400, description="The lineage graph cannot be computed because the artifact metadata is missing or malformed.")
