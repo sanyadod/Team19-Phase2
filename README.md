@@ -9,7 +9,7 @@ All baseline Phase 2 functional and non-functional requirements described in the
 
 ---
 
-**Key Features (Phase 2):**
+### Key Features:
 - **Upload Artifact** – Create an artifact from a valid URL
 - **Ingest Artifact** – Download and store ingestible artifacts
 - **Get Artifact** – Query and list stored artifacts
@@ -74,7 +74,9 @@ git clone https://github.com/sanyadod/Team19-Phase2.git
 cd Team19-Phase2
 python -m venv .venv
 source .venv/bin/activate
-pip install -r requirements.txt
+
+# install runtime dependencies from pyproject.toml
+pip install -e .
 ```
 
 ### Running the System
