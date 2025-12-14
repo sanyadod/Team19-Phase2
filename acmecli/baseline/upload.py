@@ -183,11 +183,25 @@ def create_artifact(artifact_type: str):
     if _artifact_exists_by_source(artifact_type, source_url):
         abort(409, description="Artifact exists already.")
 
+        # Generate unique artifact ID
+    artifact_id = _generate_artifact_id()
+
+    # Use provided name if available, otherwise extract from URL
+    if "name" in payload and payload["name"]:
+        artifact_name = str(payload["name"]).strip()
+        if not artifact_name:
+            abort(400, description="Artifact name cannot be empty if provided.")
+    else:
+        # Extract human-readable name from URL
+        artifact_name = _extract_name_from_url(source_url)
+
+    '''
     # Generate unique artifact ID
     artifact_id = _generate_artifact_id()
 
     # Extract human-readable name from URL
     artifact_name = _extract_name_from_url(source_url)
+    '''
 
     # S3 key: keep artifacts organized by type
     s3_key = f"{artifact_type}/{artifact_id}.zip"
