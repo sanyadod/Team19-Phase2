@@ -4,6 +4,7 @@ import json
 import time
 import hashlib
 import zipfile
+import logging
 from typing import Dict, Any, Optional
 from urllib.parse import urlparse
 
@@ -14,6 +15,7 @@ import requests
 from boto3.dynamodb.conditions import Attr
 
 app = Flask(__name__)
+logger = logging.getLogger(__name__)
 
 # --- CONFIG ---
 S3_BUCKET_DEFAULT = "ece-registry"
@@ -58,23 +60,75 @@ def _safe_zip_check(blob: bytes) -> None:
                 raise ValueError("Zip appears too large when extracted (possible zip bomb).")
 
 
-def _download_and_store(url: str, s3_key: str, bucket: str = S3_BUCKET_DEFAULT) -> tuple[int, str]:
-    """Download from URL and store in S3. Returns (size_bytes, sha256)."""
+def _validate_model_zip(blob: bytes) -> None:
+    """
+    Validate that a blob is a valid ZIP file containing config.json.
+    Raises ValueError if validation fails.
+    """
+    # Check magic bytes (PK\x03\x04)
+    if not blob.startswith(b'PK\x03\x04'):
+        logger.warning("ZIP validation failed: Missing PK magic bytes (first bytes: %s)", 
+                      blob[:10] if len(blob) >= 10 else blob)
+        raise ValueError("File is not a valid ZIP file (missing PK header).")
+    
+    # Attempt to open as ZIP
     try:
-        response = requests.get(url, timeout=300, stream=True)
+        with zipfile.ZipFile(io.BytesIO(blob)) as zf:
+            # Check for config.json anywhere in the archive
+            zip_files = zf.namelist()
+            config_found = False
+            for name in zip_files:
+                normalized = name.replace("\\", "/").strip("/")
+                if normalized == "config.json" or normalized.endswith("/config.json"):
+                    config_found = True
+                    logger.debug("Found config.json at path: %s", name)
+                    break
+            
+            if not config_found:
+                logger.warning("ZIP validation failed: config.json not found in archive (searched %d files)", 
+                              len(zip_files))
+                raise ValueError("ZIP file does not contain config.json.")
+    except zipfile.BadZipFile as e:
+        logger.warning("ZIP validation failed: BadZipFile error: %s", e)
+        raise ValueError("File is not a valid ZIP file.") from e
+
+
+def _download_and_store(url: str, s3_key: str, artifact_type: str, bucket: str = S3_BUCKET_DEFAULT) -> tuple[int, str]:
+    """
+    Download from URL and store in S3. Returns (size_bytes, sha256).
+    For model artifacts, validates that the file is a ZIP containing config.json.
+    """
+    try:
+        # Use browser-like User-Agent and allow redirects
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+        }
+        response = requests.get(url, allow_redirects=True, timeout=300, stream=True, headers=headers)
         response.raise_for_status()
 
         blob = response.content
         size = len(blob)
         
-        sha256 = hashlib.sha256(blob).hexdigest()
-
-        if url.endswith(".zip") or "zip" in response.headers.get("Content-Type", "").lower():
+        # For model artifacts, validate ZIP before storing
+        if artifact_type == "model":
+            try:
+                _validate_model_zip(blob)
+                logger.info("Model ZIP validation passed: size=%d bytes, contains config.json", size)
+            except ValueError as ve:
+                logger.error("Model ZIP validation failed: %s", ve)
+                abort(400, description="There is missing field(s) in the artifact_data or it is formed improperly (must include a single url).")
+        
+        # For non-model artifacts, perform basic zip safety check if it appears to be a zip
+        elif url.endswith(".zip") or "zip" in response.headers.get("Content-Type", "").lower():
             try:
                 _safe_zip_check(blob)
             except ValueError as ve:
+                logger.warning("Non-model ZIP safety check failed (continuing anyway): %s", ve)
                 pass
+        
+        sha256 = hashlib.sha256(blob).hexdigest()
 
+        # Only store in S3 after validation passes
         S3_CLIENT.put_object(
             Bucket=bucket,
             Key=s3_key,
@@ -183,7 +237,7 @@ def create_artifact(artifact_type: str):
     if _artifact_exists_by_source(artifact_type, source_url):
         abort(409, description="Artifact exists already.")
 
-        # Generate unique artifact ID
+    # Generate unique artifact ID
     artifact_id = _generate_artifact_id()
 
     # Use provided name if available, otherwise extract from URL
@@ -206,8 +260,8 @@ def create_artifact(artifact_type: str):
     # S3 key: keep artifacts organized by type
     s3_key = f"{artifact_type}/{artifact_id}.zip"
 
-    # Download and store in S3
-    size_bytes, sha256 = _download_and_store(source_url, s3_key)
+    # Download and store in S3 (with validation for model artifacts)
+    size_bytes, sha256 = _download_and_store(source_url, s3_key, artifact_type)
 
     # Write metadata to DynamoDB
     # Store "name" consistently, keep "filename" for backward compatibility

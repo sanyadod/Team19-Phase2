@@ -76,7 +76,7 @@ def _scan_all_models() -> Dict[str, Dict[str, Any]]:
 def _display_name(item: Dict[str, Any], fallback_id: str) -> str:
     return str(item.get("name") or item.get("filename") or fallback_id)
 
-def load_config_json_from_s3_zip(item: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+def load_config_json_from_s3(item: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """
     Load config.json from S3 zip file.
     Reads bucket=item["s3_bucket"] and key=item["s3_key"],
@@ -89,7 +89,7 @@ def load_config_json_from_s3_zip(item: Dict[str, Any]) -> Optional[Dict[str, Any
     bucket = item.get("s3_bucket")
     key = item.get("s3_key")
     
-    logger.debug("load_config_json_from_s3_zip: model_id=%s, bucket=%s, key=%s", model_id, bucket, key)
+    logger.debug("load_config_json_from_s3: model_id=%s, bucket=%s, key=%s", model_id, bucket, key)
     
     if not bucket or not key:
         logger.warning("Model %s: Missing s3_bucket or s3_key (bucket=%s, key=%s)", model_id, bucket, key)
@@ -132,7 +132,7 @@ def load_config_json_from_s3_zip(item: Dict[str, Any]) -> Optional[Dict[str, Any
                     break
             
             if not config_path:
-                logger.warning("Model %s: config.json not found in zip s3://%s/%s (searched %d files)", 
+                logger.warning("Model %s: Missing config.json in zip s3://%s/%s (searched %d files)", 
                               model_id, bucket, key, len(zip_files))
                 logger.debug("Model %s: Sample zip file names: %s", model_id, zip_files[:10] if len(zip_files) > 10 else zip_files)
                 return None
@@ -268,80 +268,18 @@ def _choose_parent_ids(item: Dict[str, Any], models: Dict[str, Dict[str, Any]],
                        name_to_id: Dict[str, str], config_cache: Dict[str, Optional[Dict[str, Any]]]) -> List[str]:
     """
     Determine parent model IDs for a given model item.
-    Priority:
-      1) direct stored parent id fields (single)
-      2) stored list fields (parents / parent_uuids / parent_ids)
-      3) config_json from S3 zip (name -> id)
+    Only uses config.json from S3 zip (name -> id).
     Returns only parents that exist in `models`.
     """
     model_id = str(item.get("id", ""))
     logger.debug("_choose_parent_ids: Starting for model_id=%s", model_id)
     
-    # Log all available fields in the item for debugging
-    all_keys = list(item.keys())
-    logger.debug("Model %s: Available DynamoDB fields: %s", model_id, all_keys)
-    
-    # 1) single stored parent id fields 
-    logger.debug("Model %s: Checking single parent ID fields...", model_id)
-    single_keys = ["parent_uuid", "parent_id", "parent_artifact_id", "base_model_id"]
-    for k in single_keys:
-        if k in item:
-            value = item[k]
-            logger.debug("Model %s: Field %s exists, value=%s (type: %s)", model_id, k, value, type(value))
-            if value is not None:
-                # Normalize ID (handle DynamoDB Decimal type, etc.)
-                pid = _normalize_id(value)
-                
-                if pid:  # Check if not empty after stripping
-                    logger.debug("Model %s: Found field %s=%s", model_id, k, pid)
-                    if pid in models:
-                        logger.info("Model %s: Found parent %s from field %s (parent exists in registry)", model_id, pid, k)
-                        return [pid]
-                    else:
-                        logger.debug("Model %s: Field %s=%s but parent not found in registry (checked %d models, sample IDs: %s)", 
-                                 model_id, k, pid, len(models), list(models.keys())[:5] if models else [])
-                else:
-                    logger.debug("Model %s: Field %s exists but is empty after conversion", model_id, k)
-            else:
-                logger.debug("Model %s: Field %s exists but is None", model_id, k)
-        else:
-            logger.debug("Model %s: Field %s not present in DynamoDB item", model_id, k)
-
-    # 2) list stored fields
-    logger.debug("Model %s: Checking list parent ID fields...", model_id)
-    list_keys = ["parents", "parent_uuids", "parent_ids", "base_model_ids"]
-    for k in list_keys:
-        if k in item:
-            raw_value = item[k]
-            logger.debug("Model %s: Field %s exists, value=%s (type: %s)", model_id, k, raw_value, type(raw_value))
-            if raw_value:
-                logger.debug("Model %s: Found list field %s=%s (type: %s)", model_id, k, raw_value, type(raw_value))
-                all_pids = _as_list(item[k])
-                logger.debug("Model %s: Normalized list field %s to parent IDs: %s", model_id, k, all_pids)
-                pids = [pid for pid in all_pids if pid in models]
-                if pids:
-                    logger.info("Model %s: Found %d parents %s from field %s (all exist in registry)", 
-                               model_id, len(pids), pids, k)
-                    return pids
-                else:
-                    missing = [pid for pid in all_pids if pid not in models]
-                    if missing:
-                        logger.debug("Model %s: Field %s has parents %s but %s not found in registry (sample model IDs: %s)", 
-                                   model_id, k, all_pids, missing, list(models.keys())[:5] if models else [])
-                    elif all_pids:
-                        logger.debug("Model %s: Field %s has parents %s but none exist in registry (sample model IDs: %s)", 
-                                   model_id, k, all_pids, list(models.keys())[:5] if models else [])
-            else:
-                logger.debug("Model %s: Field %s exists but is empty/None", model_id, k)
-        else:
-            logger.debug("Model %s: Field %s not present in DynamoDB item", model_id, k)
-
-    # 3) config_json from S3 zip (name -> id) - only if DynamoDB fields didn't work
-    logger.debug("Model %s: No parent relationships found in DynamoDB fields, attempting to load config.json from S3...", model_id)
+    # Load config.json from S3 zip
+    logger.debug("Model %s: Loading config.json from S3...", model_id)
     # Check cache first
     if model_id not in config_cache:
         logger.debug("Model %s: Config.json not in cache, loading from S3...", model_id)
-        config_cache[model_id] = load_config_json_from_s3_zip(item)
+        config_cache[model_id] = load_config_json_from_s3(item)
     else:
         logger.debug("Model %s: Using cached config.json result", model_id)
     
@@ -350,12 +288,12 @@ def _choose_parent_ids(item: Dict[str, Any], models: Dict[str, Dict[str, Any]],
         logger.debug("Model %s: Config.json loaded successfully, extracting parent name...", model_id)
         pname = _extract_parent_name_from_config(cfg)
         if pname:
-            logger.info("Model %s: Extracted base model name '%s' from config.json", model_id, pname)
+            logger.info("Model %s: Extracted parent model name '%s' from config.json", model_id, pname)
             logger.debug("Model %s: Looking up parent name '%s' in name_to_id map (map has %d entries)", 
                         model_id, pname, len(name_to_id))
             pid = name_to_id.get(pname)
             if pid and pid in models:
-                logger.info("Model %s: Successfully resolved parent name '%s' -> parent_id '%s'", model_id, pname, pid)
+                logger.info("Model %s: Resolved parent artifact_id '%s' for parent name '%s'", model_id, pid, pname)
                 return [pid]
             else:
                 logger.warning("Model %s: Parent name '%s' not found in registry (resolved to: %s, exists in models: %s)", 
@@ -368,7 +306,7 @@ def _choose_parent_ids(item: Dict[str, Any], models: Dict[str, Dict[str, Any]],
     else:
         logger.debug("Model %s: Config.json not available or failed to load (file may not be a valid zip)", model_id)
 
-    logger.info("Model %s: No parents found via any method (checked DynamoDB fields and config.json)", model_id)
+    logger.info("Model %s: No parents found (config.json missing or no parent reference)", model_id)
     return []
 
 def _build_parent_child_maps_lazy(models: Dict[str, Dict[str, Any]], 
