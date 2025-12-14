@@ -1,234 +1,116 @@
-# ACME Model Scoring CLI
+# ACME Trustworthy Model Registry
 
 ## Overview
-This tool is a **CLI program** that evaluates pre-trained Hugging Face models according to Sarah's requirements.
-It reads a list of URLs, computes multiple metrics, and outputs results as **NDJSON lines** for each MODEL URL.
+This project implements a **Trustworthy Model Registry** for evaluating, storing, and serving machine learning artifacts according to ACME Corporation’s trustworthiness requirements.
 
-**Key Features:**
-- Real-time Hugging Face API integration for accurate model data
-- NDJSON output format for machine processing
-- Human-readable summary reports with rankings and recommendations
-- Parallel processing with cross-platform compatibility
+The system evolved from a Phase 1 CLI-based scoring tool into a **fully deployed backend registry with REST APIs and a browser-based interface**, hosted on **AWS**. It supports artifact ingestion, rating, querying, search, lineage tracking, cost and license analysis, and registry administration.
 
-The CLI is implemented in **Python 3.11+** with strict code quality enforced by `flake8`, `isort`, and `mypy`.
-Tests are written in `pytest`, with coverage measured via `coverage`.
+All baseline Phase 2 functional and non-functional requirements described in the project specification have been implemented and validated using a combination of automated tests, manual testing, and autograder verification.
 
 ---
 
-## CLI Commands
+**Key Features (Phase 2):**
+- **Upload Artifact** – Create an artifact from a valid URL
+- **Ingest Artifact** – Download and store ingestible artifacts
+- **Get Artifact** – Query and list stored artifacts
+- **Download Artifact** – Retrieve artifact metadata and content
+- **Delete Artifact** – Remove artifacts by ID
+- **Reset Registry** – Clear all stored artifacts and restore default state
+- **Search Artifacts** – Regex-based search with semantic version filtering
+- **Rate Artifacts** – Compute and retrieve trustworthiness scores for model artifacts
+- **Artifact Lineage** – Track parent–child relationships between model artifacts
+- **Cost Analysis** – Estimate artifact-related cost metrics
+- **License Inspection** – Inspect and report license compatibility
 
-### Install
-```bash
-./run install
-```
-Installs all required dependencies (runtime + dev tools).
 
-### Score Models
-```bash
-./run urls.txt
-```
-- Reads a newline-delimited file of URLs.
-- Filters for MODEL URLs (Hugging Face).
-- For each model, prints **one NDJSON line** with all metrics and latencies.
+### Trust & Quality Evaluation
+- **Rate Artifact (`/rate`)**
+  - Returns all Phase 1 metrics
+  - Includes Phase 2 metrics:
+    - **Reproducibility**
+    - **Reviewedness**
+    - **TreeScore** (derived from lineage graph)
+  - Supports both legacy (`v0`) and full (`v1`) rating formats
 
-**Example output:**
-```json
-{"name":"https://huggingface.co/gpt2","category":"MODEL","net_score":0.90,...}
-```
+### Search & Discovery
+- **Search (`/search`)**
+  - Regex-based search over model names and model cards
+  - Semantic version filtering (`^`, `~`, relational ranges)
+  - Guaranteed to return a subset of enumeration results
 
-### Score Models with Summary Report
-```bash
-./run urls.txt --summary
-```
-- Same as above, but also generates **human-readable summary files**.
-- Creates timestamped `.jsonl` and `_summary.txt` files.
-- Provides executive summary, rankings, and recommendations.
+### Lineage & Analysis
+- **Lineage Graph**
+  - Extracted from model metadata
+  - Displays parent–child relationships between models
+- **Cost Analysis**
+  - Estimates download size cost for models and sub-artifacts
+- **License Compatibility Check**
+  - Validates compatibility between model licenses and associated GitHub repositories
 
-**Custom output filename:**
-```bash
-./run urls.txt --summary --output my_analysis
-```
+### Interfaces
+- **Programmatic Interface**
+  - Fully REST-compliant API following the provided OpenAPI specification
+- **Human Interface**
+  - Browser-based UI with multiple functional views
+  - Styled, navigable interface (not a single query box)
 
-**Example summary output:**
-```
-🤖 ACME MODEL EVALUATION SUMMARY REPORT
-========================================
-Generated: 2025-09-21 13:27:12
-Total Models Evaluated: 3
-
-📊 EXECUTIVE SUMMARY
-Average Quality Score: 65.2% (Good)
-
-🏆 TOP MODELS RANKING
-1. bert-base-uncased (Score: 72.1% - Good)
-2. gpt2 (Score: 60.7% - Good)
-3. distilbert-base-uncased (Score: 62.8% - Good)
-
-💡 RECOMMENDATIONS
-⚠️ No LGPL-2.1 compliant models found.
-🥧 2 models suitable for Raspberry Pi deployment.
-```
-
-### Run Tests
-```bash
-./run test
-```
-Runs tests and coverage. Always prints:
-```
-X/Y test cases passed. Z% line coverage achieved.
-```
+### Deployment & Operations
+- **AWS Deployment**
+  - EC2-hosted Flask backend
+  - DynamoDB for persistent artifact metadata
+- **Observability**
+  - `/health` endpoint for system status
+  - Log-based monitoring for recent activity
 
 ---
 
-## Project Structure
+### Installation
+**Prerequisites**
+- Python >= 3.8
+- AWS credentials configured for DynamoDB access
 
-```
-acmecli/
-  __init__.py
-  main.py              # CLI entrypoint
-  logging_cfg.py       # sets up logging via $LOG_FILE, $LOG_LEVEL
-  io_utils.py          # read/write URLs + NDJSON
-  urls.py              # URL classifier (MODEL/DATASET/CODE)
-  scoring.py           # combines metrics into output dict
-  metrics/
-    base.py           # Metric protocol + timing decorator
-    repo_scan.py      # Metrics from repo/dataset inspection
-    hf_api.py         # Metrics from Hugging Face API (stub for now)
-tests/
-  test_smoke.py       # starter unit tests
-  test_streamlit_ui.py  # Selenium browser tests for Streamlit UI
-test_artifacts/        # Test-generated files (ignored by Git)
-  README.md           # Documentation of test artifacts
-  *.jsonl             # NDJSON test results and data files
-  *_summary.txt       # Generated summary reports from tests
-  urls.txt            # Test input files
-run                   # CLI shim (install, test, scoring)
-pyproject.toml        # deps + lint/test/type configs
-```
-
----
-
-## Metrics
-
-Each metric is implemented as a function that returns `(score ∈ [0,1], latency_ms)`.
-
-| Metric | Formula / Rule | Source |
-|--------|---------------|--------|
-| **Size** | Linear decay: `(U - S) / (U - L)`, clipped to [0,1] | Repo scan |
-| **License** | 1.0 if LGPL-2.1 compatible, 0.5 if unclear, 0.0 if incompatible | Repo scan |
-| **Ramp Up Time** | Average of 5 flags (README, Quickstart, Tutorials, API docs, Reproducibility) | Repo scan |
-| **Bus Factor** | Contributors / (Contributors + k), k=5 | Repo scan/API |
-| **Dataset & Code** | (DatasetFlag + CodeFlag) / 2 | Repo scan |
-| **Dataset Quality** | (Source + License + Splits + Ethics) / 4 | Repo scan |
-| **Code Quality** | 0.4·Flake8 + 0.2·Isort + 0.4·Mypy | Linting tools |
-| **Perf. Claims** | (Benchmarks + Citations) / 2 | Repo/API |
-
-### NetScore
-```
-NetScore = 0.20*License + 0.20*DatasetAndCode + 0.15*CodeQuality
-         + 0.15*RampUp + 0.10*BusFactor + 0.10*PerformanceClaims
-         + 0.05*DatasetQuality + 0.05*Size
-```
-
----
-
-## How It Works
-
-1. **URL File Parsing**
-   Reads `urls.txt`, filters for Hugging Face MODEL URLs.
-
-2. **Context Builder (`build_ctx_from_url`)**
-   - Milestone 2: returns **placeholder values**
-   - Milestone 3: will query Hugging Face API + scan repos
-
-3. **Metric Computation**
-   Each metric is decorated with `@timed`, so we record its runtime latency.
-
-4. **Scoring & Output**
-   `compute_all_scores()` gathers metric results, builds the NDJSON object, and computes NetScore.
-
-5. **Parallel Execution**
-   Models are processed in parallel using `ProcessPoolExecutor`.
-
----
-
-## Testing
-
-- Tests are located in `tests/`
-- Run with:
 ```bash
-./run test
+git clone https://github.com/sanyadod/Team19-Phase2.git
+cd Team19-Phase2
+python -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
 ```
-- Current tests: basic smoke tests for all metrics
-- Coverage target: **≥80%** before final delivery
-- Plan: expand with more unit + integration tests in Milestone 3
 
-### Selenium UI Tests
-
-The project includes automated browser tests for the Streamlit frontend using Selenium:
-
-**Running Selenium Tests:**
+### Running the System
 ```bash
-# Run all Selenium tests
-make test-selenium
-# or
-pytest tests/test_streamlit_ui.py -v
-
-# Run with visible browser (for debugging)
-HEADLESS=false pytest tests/test_streamlit_ui.py -v
-
-# Skip Selenium tests when running all tests
-pytest -m "not selenium"
+python acmecli/baseline/backend.py
 ```
 
-**Test Coverage:**
-- Home page rendering and navigation
-- Upload page form validation
-- Download, Search, Lineage, Cost, License, Rate pages
-- Sidebar navigation and page switching
-- Backend URL configuration
+## Testing & Validation
 
-**Requirements:**
-- Chrome/Chromium browser installed
-- ChromeDriver (automatically managed by `webdriver-manager`)
-- Streamlit installed and available in PATH
+The system is validated using a combination of:
 
-**Test Infrastructure:**
-- Automatically starts Streamlit server on port 8502 for testing
-- Uses headless Chrome by default (set `HEADLESS=false` to see browser)
-- Cleans up server process after tests complete
+- **Automated unit tests**
+- **Manual test**
+- **Feature-level and integration tests**
+- **End-to-end system tests**
+- **Autograder verification**
 
-### Test Artifacts Directory
+### Test Coverage
+- Unit, feature, and system tests collectively exceed the required coverage threshold
+- Error paths and negative cases are explicitly tested where applicable
 
-The `test_artifacts/` directory contains files generated during test execution:
+### UI Testing
+- Selenium-based automated tests validate the web interface
+- Tests cover:
+  - Page navigation
+  - Form validation
+  - Backend integration
+  - Search, rate, download, and registry views
 
-- **Purpose**: Stores all test-generated files to keep the project root clean
-- **Contents**: NDJSON test data, summary reports, evaluation results, and temporary test files
-- **Git Status**: Directory is ignored by Git (see `.gitignore`)
-- **Management**: Files persist after test runs for debugging purposes, can be safely deleted
-- **Organization**: Replaces previous behavior where test files were created in the project root
+All tests can be run locally using test specific file.
 
-This directory ensures a clean workspace while maintaining all test functionality and providing easy access to test-generated files for debugging.
+## Specification Compliance
 
----
+This system complies with:
+- The provided **OpenAPI specification**
+- All **baseline Phase 2 functional requirements**
+- Required **non-functional requirements**, including CI/CD, testing, and AWS deployment
 
-## Development Guidelines
-
-- **Code Style**
-  - Pass `flake8`, `isort`, `mypy`
-  - Type annotations required
-
-- **Testing**
-  - Every function should have at least one test
-  - Another teammate should add an extra test for each module
-
-- **Error Handling**
-  - On fatal error, program exits with code **1**
-  - Always print a clear error message to stderr
-  - Logs go to `$LOG_FILE` at verbosity `$LOG_LEVEL`
-
-- **Pull Requests**
-  - Must pass CI before merging
-  - Require peer review
-
----
+The system is deployed and accessible via a single public endpoint and was validated using the course autograder.
